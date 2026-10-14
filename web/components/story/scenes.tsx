@@ -43,7 +43,6 @@ export const heroChoreo: Choreo = (_t, time) => ({
   claude: {
     x: 136 + Math.sin(time * 0.6) * 7,
     y: 26 + Math.cos(time * 0.8) * 5,
-    say: "mind if i hop in?",
   },
   codex: { ...alive({ x: 150, y: 70 }, time, 2, 1.6), r: 8 },
 });

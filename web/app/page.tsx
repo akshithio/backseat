@@ -39,11 +39,10 @@ const HOW = [
   },
 ];
 
-function SectionHead({ id, kicker, title, children }: { id: string; kicker: string; title: React.ReactNode; children?: React.ReactNode }) {
+function SectionHead({ id, title, children }: { id: string; title: React.ReactNode; children?: React.ReactNode }) {
   return (
     <div id={id} className="scroll-mt-8">
-      <p className="label text-accent">{kicker}</p>
-      <h2 className="display mt-1 text-[clamp(2.2rem,7vw,4.4rem)] leading-[0.95]">{title}</h2>
+      <h2 className="display text-[clamp(2.2rem,7vw,4.4rem)] leading-[0.95]">{title}</h2>
       {children ? <div className="mt-4 max-w-[38rem] text-[13.5px] leading-[1.75] text-ink/85">{children}</div> : null}
     </div>
   );
@@ -55,7 +54,7 @@ export default function Home() {
       <StorySection />
 
       <section className="mx-auto max-w-[1120px] space-y-10 px-4 pb-24 sm:px-6">
-        <SectionHead id="numbers" kicker="the numbers" title="What we measured.">
+        <SectionHead id="numbers" title="What we measured.">
           <p>Measured on a real Mac.</p>
         </SectionHead>
         <FocusReplay />
@@ -64,7 +63,7 @@ export default function Home() {
       </section>
 
       <section className="mx-auto max-w-[1120px] px-4 pb-24 sm:px-6">
-        <SectionHead id="how" kicker="under the hood" title="How it stays in the back seat.">
+        <SectionHead id="how" title="How it works.">
           <p>
             One rule: nothing backseat does activates the app it&apos;s driving. Activation is what takes your keyboard
             focus, and what drags you across Spaces.
@@ -90,7 +89,7 @@ export default function Home() {
       </section>
 
       <section className="mx-auto max-w-[1120px] px-4 pb-24 sm:px-6">
-        <SectionHead id="install" kicker="climb in" title="Install it.">
+        <SectionHead id="install" title="Install it.">
           <p>
             One command builds backseat and adds it to Claude Code.
           </p>
@@ -125,7 +124,6 @@ export default function Home() {
               <Mark className="h-10 w-10 text-paper" />
               <span className="display text-[44px] leading-none">backseat</span>
             </div>
-            <p className="label mt-4 text-paper/60">your Mac stays yours. the agent rides along.</p>
           </div>
           <nav className="flex flex-wrap items-baseline gap-x-5 gap-y-2 text-[11px] tracking-[0.08em] text-paper/60">
             <a href={SITE.github} target="_blank" rel="noreferrer" className="transition-colors hover:text-paper">
