@@ -54,26 +54,3 @@ export type HeadToHead = {
 
 export const HEAD_TO_HEAD: HeadToHead | null = null;
 
-export const TOOLS = [
-  "permissions",
-  "list_apps",
-  "list_windows",
-  "launch_app",
-  "get_ui_tree",
-  "find_elements",
-  "element_info",
-  "perform_action",
-  "set_value",
-  "type_text",
-  "press_key",
-  "click",
-  "scroll",
-  "drag",
-  "screenshot",
-  "select_menu_item",
-  "list_menu",
-  "read_text",
-  "close_window",
-  "run_script",
-  "wait",
-];

@@ -4,7 +4,7 @@ import { HeadToHead } from "@/components/HeadToHead";
 import { Install } from "@/components/Install";
 import { Mark } from "@/components/Mark";
 import { StorySection } from "@/components/story/StorySection";
-import { SITE, TOOLS } from "@/lib/data";
+import { SITE } from "@/lib/data";
 
 const HOW = [
   {
@@ -101,19 +101,6 @@ export default function Home() {
               then ask for something and keep working: &ldquo;tidy my Downloads while I finish this email.&rdquo;
             </p>
           </div>
-        </div>
-        <div className="mt-10">
-          <h3 className="text-[11px] tracking-[0.08em] text-muted">{TOOLS.length} TOOLS</h3>
-          <ul className="mt-3 flex flex-wrap gap-2">
-            {TOOLS.map((tool, i) => (
-              <li
-                key={tool}
-                className="border border-rule bg-card px-2.5 py-0.5 text-[11.5px] transition-colors hover:border-ink"
-              >
-                {tool}
-              </li>
-            ))}
-          </ul>
         </div>
       </section>
 
