@@ -3,3 +3,5 @@
 *.xcodeproj
 __pycache__/
 .DS_Store
+bench/.mac-agent-bench/
+bench/results/

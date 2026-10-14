@@ -57,6 +57,14 @@ claude mcp add backseat -- "$(pwd)/.build/release/backseat"
 
 The app that launches backseat (your terminal or MCP client) needs Accessibility and Screen Recording permission.
 
+## Benchmark
+
+```sh
+python3 bench/compare.py
+```
+
+Runs 5 [mac-agent-bench](https://github.com/PrithviSeran/mac-agent-bench) tasks through Claude Code with backseat and through Codex with its computer use, judges each with the task's own checker, and counts how often the frontmost app changed and the pointer moved during the run. Run it while you're away from the Mac: Codex takes the real pointer and focus, and anything you do counts against the tool that's running. `--dry-run` checks the setup without running agents.
+
 ## Test
 
 ```sh
