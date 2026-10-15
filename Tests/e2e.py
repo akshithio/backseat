@@ -387,6 +387,18 @@ def full_suite(r):
             other.close()
     r.check("an agent never acts in a window it didn't open", someone_elses_window)
 
+    def main_window_kept():
+        # A command that opens a window makes it the app's main window: the one
+        # the user lands in when they switch to the app. backseat gives the
+        # window that was main before its place back.
+        m.ok("select_menu_item", pid=pid, path=["Fixture", "New Key Window"])
+        time.sleep(1.8)
+        main = m.ok("get_ui_tree", pid=pid, max_nodes=1).splitlines()[1]
+        assert '"Backseat Fixture"' in main, main
+        extra = re.search(r'window (\d+) .*"Fixture Key Extra"', m.ok("list_windows", pid=pid)).group(1)
+        m.ok("close_window", window_id=int(extra))
+    r.check("opening a window leaves the app's main window as it was", main_window_kept)
+
     def menus():
         out = m.ok("list_menu", pid=pid, path=["Fixture"])
         assert "Reset Counter" in out and "cmd+r" in out, out

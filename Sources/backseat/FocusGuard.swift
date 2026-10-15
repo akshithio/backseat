@@ -155,13 +155,38 @@ final class FocusGuard: @unchecked Sendable {
         }
     }
 
+    /// The window an app takes the user back to when they next switch to it is
+    /// its main window. A command that opens a window (New Window) makes the new
+    /// one main, so the user would land in the agent's window instead of theirs.
+    /// While the app stays in the background, make `window` main again.
+    func holdMain(pid: pid_t, window: AXUIElement) {
+        guard let id = AX.windowID(window) else { return }
+        for delay in [0.05, 0.15, 0.3, 0.6, 1.0, 1.6] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard let app = NSRunningApplication(processIdentifier: pid), !app.isActive, !app.isTerminated,
+                      let now = AX.attr(AX.app(pid), kAXMainWindowAttribute).map({ $0 as! AXUIElement }),
+                      AX.windowID(now) != id, AX.window(id: id, pid: pid) != nil else { return }
+                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            }
+        }
+    }
+
+    /// The app's main window, while the user isn't in the app.
+    static func mainWindow(ofBackground pid: pid_t) -> AXUIElement? {
+        guard NSRunningApplication(processIdentifier: pid)?.isActive == false else { return nil }
+        return AX.attr(AX.app(pid), kAXMainWindowAttribute).map { $0 as! AXUIElement }
+    }
+
     /// Runs an action against `target` with the guard armed for it.
     static func run<T>(target: pid_t, _ body: () async throws -> T) async throws -> (T, String) {
         shared.touch(target)
-        // If the user is in this app, remember their window to keep them in it.
+        // If the user is in this app, remember their window to keep them in it;
+        // if not, remember the window the app would take them back to.
         let userWindow = Ownership.userWindow(pid: target)
+        let mainBefore = userWindow == nil ? mainWindow(ofBackground: target) : nil
         let result = try await body()
         if let userWindow { shared.holdWindow(pid: target, window: userWindow) }
+        if let mainBefore { shared.holdMain(pid: target, window: mainBefore) }
         // Give a self-activation triggered by the action time to arrive and be undone.
         try? await Task.sleep(for: .milliseconds(60))  // activations land within ~25ms
         return (result, shared.drainNotes(for: target))

@@ -702,17 +702,30 @@ enum Tools {
                 }
             }
             if method != "keys", let element {
+                // Some apps (web text fields especially) accept an insert and drop
+                // it, or show it a moment later. Only call it typed once the field
+                // shows the change; wait long enough that a late one isn't typed twice.
+                let before = AX.valueString(element)
+                func landed() async -> Bool {
+                    guard before != nil else { return true }  // nothing to compare against
+                    for _ in 0..<20 {
+                        if let now = AX.valueString(element), now != before { return true }
+                        try? await Task.sleep(for: .milliseconds(50))
+                    }
+                    return false
+                }
                 if AX.isSettable(element, kAXSelectedTextAttribute),
-                   AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString) == .success {
+                   AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString) == .success,
+                   await landed() {
                     return "inserted via accessibility"
                 }
+                if AX.isSettable(element, kAXValueAttribute),
+                   AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, ((before ?? "") + text) as CFString) == .success,
+                   await landed() {
+                    return "added to the field's value via accessibility (the app ignored a plain insert)"
+                }
                 if method == "ax" {
-                    guard AX.isSettable(element, kAXValueAttribute) else {
-                        throw ToolError("element doesn't accept text through accessibility; try method \"keys\"")
-                    }
-                    let current = AX.valueString(element) ?? ""
-                    try AX.check(AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, (current + text) as CFString), "appending text")
-                    return "appended to value via accessibility"
+                    throw ToolError("the field didn't change: the app didn't take the text through accessibility. Try method \"keys\".")
                 }
             } else if method == "ax" {
                 throw ToolError("app has no focused text element; pass element_id")
@@ -720,6 +733,7 @@ enum Tools {
             guard AX.attr(AX.app(pid), kAXFocusedUIElementAttribute) != nil else {
                 throw ToolError("nothing in this app has keyboard focus, so keystrokes would just beep. Pass element_id for the field to type into.")
             }
+            try aim(at: element.flatMap(AX.containingWindow), pid: pid, what: "typing", args)
             Input.type(text, pid: pid)
             return "sent as key events to pid \(pid)"
         }
@@ -823,8 +837,9 @@ enum Tools {
                 return .text("\(combo) is \(item.path): \(outcome)")
             }
             let before = Set(Windows.list(pid: pid).map(\.id))
-            let (_, note) = try await FocusGuard.run(target: pid) {
-                try AX.press(item.element, "choosing \(title)")
+            let (_, note) = try await FocusGuard.run(target: pid) { () -> String in
+                try aim(at: target.flatMap { AX.containingWindow($0) ?? $0 }, pid: pid, what: combo, args)
+                return try AX.press(item.element, "choosing \(title)")
             }
             let windows = try await newWindows(pid: pid, before: before)
             return .text("\(combo) is \(item.path); chose it from the menu\(windows)\(note)")
@@ -836,7 +851,6 @@ enum Tools {
         let plainKey = !flags.contains(.maskCommand) && !flags.contains(.maskControl) && !flags.contains(.maskAlternate)
         if plainKey, ["return", "enter"].contains(combo.lowercased()), let target,
            AX.string(target, kAXRoleAttribute) != "AXTextArea" {
-            let what = describe(target, ElementStore.shared.add(target))
             if let window = AX.containingWindow(target) ?? (AX.string(target, kAXRoleAttribute) == "AXWindow" ? target : nil),
                let b = AX.attr(window, kAXDefaultButtonAttribute), CFGetTypeID(b) == AXUIElementGetTypeID() {
                 let button = b as! AXUIElement
@@ -854,6 +868,7 @@ enum Tools {
         let times = max(1, args.int("repeat") ?? 1)
         let before = Set(Windows.list(pid: pid).map(\.id))
         let (_, note) = try await FocusGuard.run(target: pid) {
+            try aim(at: target.flatMap { AX.containingWindow($0) ?? $0 }, pid: pid, what: combo, args)
             for _ in 0..<times {
                 Input.key(code: code, flags: flags, pid: pid)
                 usleep(15_000)
@@ -1127,6 +1142,24 @@ enum Tools {
 
     // MARK: Menus and waiting
 
+    /// Keys and window commands (Bold, Save, a shortcut) go to an app's main
+    /// window. Make `window`, the agent's, main for this action; FocusGuard.run
+    /// gives the user's window its place back afterwards. If the user is in
+    /// that app right now, the input would reach whatever they have in front,
+    /// so refuse. Call inside FocusGuard.run's body.
+    static func aim(at window: AXUIElement?, pid: pid_t, what: String, _ args: Args) throws {
+        guard let window, let id = AX.windowID(window) else { return }
+        if let user = Ownership.userWindow(pid: pid) {
+            if user == id || args.bool("user_window") == true { return }
+            let app = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "that app"
+            throw ToolError("""
+            \(what) would reach the window the user has in front in \(app), not window \(id): they're using \(app) right now. \
+            Nothing was sent. Use set_value, type_text or click on elements of your window instead, or try again once they've switched away.
+            """)
+        }
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+    }
+
     /// Windows `pid` opened since `before` was taken, as text for a tool's reply.
     /// Commands like New Window or Go to Folder finish asynchronously, so wait briefly.
     static func newWindows(pid: pid_t, before: Set<CGWindowID>) async throws -> String {
@@ -1259,8 +1292,9 @@ enum Tools {
             return .text("\(name): \(outcome)")
         }
         let before = Set(Windows.list(pid: pid).map(\.id))
-        let (outcome, note) = try await FocusGuard.run(target: pid) {
-            try AX.press(item, "choosing menu item")
+        let (outcome, note) = try await FocusGuard.run(target: pid) { () -> String in
+            if let w = args.int("window_id") { try aim(at: AX.window(id: CGWindowID(w), pid: pid, search: true), pid: pid, what: name, args) }
+            return try AX.press(item, "choosing menu item")
         }
         let app = NSRunningApplication(processIdentifier: pid)
         // Commands like New Window finish asynchronously; report what they opened.
@@ -1317,7 +1351,8 @@ enum Tools {
         var parts: [[String]] = [[], [], []]
         var total = 0
         var visited = 0
-        let browser = contains(root, role: "AXWebArea")
+        let webs = AX.string(root, kAXRoleAttribute) == "AXWebArea" ? [] : webAreas(root)
+        let browser = !webs.isEmpty
         func add(_ s: String, _ part: Int) {
             let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty, parts[part].last != t else { return }
@@ -1335,6 +1370,8 @@ enum Tools {
                 for child in AX.elements(e, kAXChildrenAttribute) { visit(child, depth: depth + 1, part: chrome, inWeb: inWeb) }
                 return
             case "AXWebArea":
+                // The window's pages were read first; frames inside a page are read in place.
+                if !inWeb && webs.contains(where: { CFEqual($0, e) }) { return }
                 for child in AX.elements(e, kAXChildrenAttribute) { visit(child, depth: depth + 1, part: main, inWeb: true) }
                 return
             case "AXSplitGroup" where part == main:
@@ -1361,6 +1398,10 @@ enum Tools {
             }
             for child in AX.elements(e, kAXChildrenAttribute) { visit(child, depth: depth + 1, part: part, inWeb: inWeb) }
         }
+        // The page first, so nothing else uses up the budget before it.
+        for web in webs {
+            for child in AX.elements(web, kAXChildrenAttribute) { visit(child, depth: 1, part: main, inWeb: true) }
+        }
         visit(root, depth: 0, part: main, inWeb: false)
 
         var text = ""
@@ -1375,18 +1416,6 @@ enum Tools {
         }
         if cut || total >= limit * 4 { text += "\n… truncated; raise max_chars or pass element_id" }
         return .text(text.isEmpty ? "no text in \(what)" : text)
-    }
-
-    /// Whether `root` has a descendant with this role (searched breadth-first, bounded).
-    private static func contains(_ root: AXUIElement, role: String) -> Bool {
-        var queue = [root]
-        var seen = 0
-        while !queue.isEmpty, seen < 400 {
-            let e = queue.removeFirst(); seen += 1
-            if AX.string(e, kAXRoleAttribute) == role { return true }
-            queue += AX.elements(e, kAXChildrenAttribute)
-        }
-        return false
     }
 
     static func clipboard(_ args: Args) -> Output {
@@ -1652,14 +1681,19 @@ enum Tools {
         }
     }
 
+    /// The web pages in a window. Long lists (a browser sidebar with hundreds of
+    /// tabs) never hold the page, so the search doesn't go into them.
     private static func webAreas(_ root: AXUIElement) -> [AXUIElement] {
         var found: [AXUIElement] = []
         var queue = [root]
-        var seen = 0
-        while !queue.isEmpty, seen < 600 {
-            let e = queue.removeFirst(); seen += 1
-            if AX.string(e, kAXRoleAttribute) == "AXWebArea" { found.append(e); continue }
-            queue += AX.elements(e, kAXChildrenAttribute)
+        var head = 0
+        while head < queue.count, head < 3000 {
+            let e = queue[head]; head += 1
+            let v = AX.values(e, [kAXRoleAttribute, kAXChildrenAttribute])
+            let role = v[0] as? String ?? ""
+            if role == "AXWebArea" { found.append(e); continue }
+            if ["AXList", "AXOutline", "AXTable", "AXBrowser", "AXRow", "AXMenuBar", "AXMenu"].contains(role) { continue }
+            queue += v[1] as? [AXUIElement] ?? []
         }
         return found
     }

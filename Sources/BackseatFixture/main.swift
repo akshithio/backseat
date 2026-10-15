@@ -156,6 +156,9 @@ final class Controller: NSObject, NSTextFieldDelegate, NSApplicationDelegate, NS
         fixtureItem.submenu?.addItem(focusOnly)
         // Like File > New in most apps: opens a window, ordered in front, on the user's Space.
         fixtureItem.submenu?.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "").target = self
+        // Like a browser's New Window: the new window becomes the app's key and
+        // main window, the one the user lands in when they next switch to the app.
+        fixtureItem.submenu?.addItem(withTitle: "New Key Window", action: #selector(newKeyWindow), keyEquivalent: "").target = self
         // Like Finder's New Finder Window: a command that activates the app itself.
         fixtureItem.submenu?.addItem(withTitle: "Bring To Front", action: #selector(bringToFront), keyEquivalent: "").target = self
         menu.addItem(appItem); menu.addItem(fixtureItem)
@@ -168,6 +171,7 @@ final class Controller: NSObject, NSTextFieldDelegate, NSApplicationDelegate, NS
                 "text": input.stringValue, "keysText": keyField.stringValue,
                 "checked": checkbox.state == .on, "slider": slider.doubleValue,
                 "isKey": window.isKeyWindow, "appActive": NSApp.isActive,
+                "mainTitle": NSApp.mainWindow?.title ?? "", "keyTitle": NSApp.keyWindow?.title ?? "",
             ]
             for (k, v) in snapshot where !(State.values[k] as AnyObject).isEqual(v) { State.set(k, v) }
         }
@@ -261,6 +265,19 @@ final class Controller: NSObject, NSTextFieldDelegate, NSApplicationDelegate, NS
 
     let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 260, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
     var extraWindows: [NSWindow] = []
+    @objc func newKeyWindow() {
+        let w = FixtureWindow(contentRect: NSRect(x: 80, y: 80, width: 260, height: 160), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        w.title = "Fixture Key Extra"
+        w.isReleasedWhenClosed = false
+        w.unconstrained = window.unconstrained
+        w.alphaValue = window.alphaValue
+        w.collectionBehavior = window.collectionBehavior
+        w.setFrameOrigin(NSPoint(x: window.frame.minX, y: window.frame.minY))
+        w.makeKeyAndOrderFront(nil)
+        w.makeMain()
+        extraWindows.append(w)
+        State.bump("keyWindows")
+    }
     @objc func newWindow() {
         let w = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 260, height: 160), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "Fixture Extra"
