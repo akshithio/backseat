@@ -53,7 +53,23 @@ enum AX {
     static func app(_ pid: pid_t) -> AXUIElement {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 3)
+        enableFullTree(app, pid)
         return app
+    }
+
+    private static let enabledLock = NSLock()
+    nonisolated(unsafe) private static var enabled: Set<pid_t> = []
+
+    /// Chromium-based apps (Chrome, Arc, Edge, Electron apps) build only a
+    /// partial accessibility tree for web content until a client asks for the
+    /// full one: page buttons and links come without their press action, so
+    /// clicks on them can't go through accessibility. Ask once per app; other
+    /// apps don't have the attribute and ignore it.
+    private static func enableFullTree(_ app: AXUIElement, _ pid: pid_t) {
+        enabledLock.lock()
+        let first = enabled.insert(pid).inserted
+        enabledLock.unlock()
+        if first { AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue) }
     }
 
     static func attr(_ e: AXUIElement, _ name: String) -> AnyObject? {

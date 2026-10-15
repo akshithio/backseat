@@ -59,13 +59,15 @@ enum Tools {
         ),
         Tool(
             name: "launch_app",
-            description: "Launch or reveal an app in the background without taking focus from the user, optionally opening a URL or file in it (a web page, a document). Returns its pid and windows.",
+            description: "Launch or reveal an app in the background without taking focus from the user, optionally opening a URL or file in it (a web page, a document). Returns its pid and windows. With window_id, loads the url in that window of yours instead of opening a new one: use this to go from page to page in a browser.",
             inputSchema: schema([
                 "bundle_id": prop("string", "e.g. com.apple.TextEdit"),
                 "name": prop("string", "App name, e.g. TextEdit. Used if bundle_id is absent."),
                 "path": prop("string", "Path to an .app bundle or executable."),
                 "arguments": .object(["type": "array", "items": .object(["type": "string"]), "description": "Command-line arguments."]),
                 "url": prop("string", "A URL or file path to open, in the given app or else the default one (https://… opens in the default browser)."),
+                "window_id": prop("integer", "A browser window you opened: load url in its current tab instead of opening a new window."),
+                "user_window": userWindow,
             ])
         ),
         Tool(
@@ -371,6 +373,9 @@ enum Tools {
     }
 
     static func launchApp(_ args: Args) async throws -> Output {
+        if let wid = args.int("window_id") {
+            return try await navigate(window: CGWindowID(wid), to: try args.require("url", args.string), args)
+        }
         let url: URL
         if let path = args.string("path") {
             url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
@@ -394,6 +399,8 @@ enum Tools {
         FocusGuard.shared.expectLaunch(of: url)
         // If the app is already running, only windows this launch opens are the agent's.
         let running = NSWorkspace.shared.runningApplications.first { $0.bundleURL?.standardizedFileURL == url.standardizedFileURL }
+        // Opening a document or page in a running app opens another window.
+        if let running, document != nil { try Ownership.checkBudget(pid: running.processIdentifier) }
         let before = running.map { Set(Windows.list(pid: $0.processIdentifier).map(\.id)) }
         let userWindow = running.flatMap { Ownership.userWindow(pid: $0.processIdentifier) }
         let app: NSRunningApplication
@@ -421,6 +428,162 @@ enum Tools {
         keepUserOnTop(windows)
         let list = windows.map(\.line).joined(separator: "\n")
         return .text("launched \(app.localizedName ?? url.lastPathComponent) pid=\(app.processIdentifier)\n\(list.isEmpty ? "no windows yet" : list)" + FocusGuard.shared.drainNotes(for: app.processIdentifier))
+    }
+
+    /// Throws unless scripting `app` is already allowed. Asks macOS without
+    /// prompting, so the user never sees a "wants access to control" dialog.
+    static func checkAutomation(_ app: NSRunningApplication) throws {
+        guard let id = app.bundleIdentifier else { return }
+        let target = NSAppleEventDescriptor(bundleIdentifier: id)
+        let status = AEDeterminePermissionToAutomateTarget(target.aeDesc, AEEventClass(typeWildCard), AEEventID(typeWildCard), false)
+        let appName = app.localizedName ?? id
+        if status == OSStatus(errAEEventWouldRequireUserConsent) {
+            throw ToolError("""
+            not run: controlling \(appName) by script would make macOS show the user a permission dialog \
+            ("… wants access to control \(appName)"). Use backseat's accessibility tools on \(appName) instead. \
+            Pass allow_prompt: true only if the user has said they're fine being asked once.
+            """)
+        }
+        if status == OSStatus(errAEEventNotPermitted) {
+            throw ToolError("not run: the user hasn't allowed scripting \(appName) (System Settings › Privacy & Security › Automation). Use backseat's accessibility tools instead.")
+        }
+    }
+
+    /// Loads `target` in the current tab of browser window `wid`, so an agent
+    /// moves from page to page in one window instead of opening one per page.
+    /// Browsers don't take URLs through accessibility once a page has loaded
+    /// (Arc has no address field at all), but scriptable ones (Safari, Chrome,
+    /// Arc, Edge, Brave…) set a tab's URL by Apple Event, in the background.
+    static func navigate(window wid: CGWindowID, to target: String, _ args: Args) async throws -> Output {
+        let info = try Windows.get(wid)
+        try Ownership.check(window: wid, pid: info.pid, args)
+        guard let app = NSRunningApplication(processIdentifier: info.pid), let bundle = app.bundleIdentifier else {
+            throw ToolError("window \(wid)'s app isn't running")
+        }
+        try checkAutomation(app)
+        guard let axWindow = AX.window(id: wid, pid: info.pid, search: true), let title = AX.string(axWindow, kAXTitleAttribute) else {
+            throw ToolError("window \(wid) has no title to find it by")
+        }
+        // A new window with no page yet has nothing to navigate from inside,
+        // and setting its URL by script brings some browsers (Arc) to the front.
+        guard !webAreas(axWindow).isEmpty else {
+            throw ToolError("""
+            window \(wid) has no page open yet, so nothing was loaded. Type the first address into its own field \
+            (find_elements role AXTextField, set_value, press_key return); after that, launch_app with url and window_id \
+            moves it from page to page.
+            """)
+        }
+        FocusGuard.shared.touch(info.pid, seconds: 5)
+        let userWindow = Ownership.userWindow(pid: info.pid)
+        // Navigating from inside the page first: setting a tab's URL makes some
+        // browsers (Arc) bring themselves to the front. Chromium browsers and
+        // Arc call it the active tab, Safari the current tab.
+        let u = appleScriptString(target)
+        let js = appleScriptString("location.href = " + (String(data: try JSONEncoder().encode(target), encoding: .utf8) ?? "\"\""))
+        let (result, errors) = try await inBrowserWindow(bundle: bundle, title: title, [
+            "tell active tab to execute javascript \(js)", "do JavaScript \(js) in current tab",
+            "set URL of active tab to \(u)", "set URL of current tab to \(u)",
+        ])
+        let lastError = errors.first { !$0.contains("-2740") && !$0.contains("-2741") } ?? errors.first ?? ""
+        if let userWindow { FocusGuard.shared.holdWindow(pid: info.pid, window: userWindow) }
+        if result.hasPrefix("matches") {
+            throw ToolError("couldn't tell window \(wid) apart from \(info.app)'s other windows by title (\(result)); nothing was loaded. Close it and open a new one with launch_app url.")
+        }
+        guard result == "ok" else {
+            throw ToolError("\(info.app) can't load a URL into a window by script (\(lastError.isEmpty ? "no tab URL property" : lastError)). Close window \(wid) and open the page with launch_app url instead.")
+        }
+        return .text("loading \(target) in window \(wid); wait until loaded before reading it" + FocusGuard.shared.drainNotes(for: info.pid))
+    }
+
+    static func appleScriptString(_ s: String) -> String {
+        "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
+    /// Runs the first of `attempts` that works inside one browser window, found
+    /// by its title (scripting has its own window ids), and only if exactly one
+    /// window has that title, so the user's window is never hit. Each attempt
+    /// is a statement aimed at the window; a `return` in it is the result.
+    /// Returns "matches N" if the title didn't single out one window.
+    static func inBrowserWindow(bundle: String, title: String, _ attempts: [String]) async throws -> (result: String, errors: [String]) {
+        var errors: [String] = []
+        for statement in attempts {
+            let script = """
+            tell application id \(appleScriptString(bundle))
+                set hits to {}
+                repeat with w in windows
+                    if name of w is \(appleScriptString(title)) then set end of hits to id of w
+                end repeat
+                if (count of hits) is not 1 then return "matches " & (count of hits)
+                tell window id (item 1 of hits) to \(statement)
+                return "ok"
+            end tell
+            """
+            let (out, err, status) = try await osascript(script)
+            if status == 0 { return (out, errors) }
+            errors.append(err)
+        }
+        return ("", errors)
+    }
+
+    /// Clicks the web page element at `point` (window-relative) from inside the
+    /// page. Arc and other Chromium browsers neither take pointer events in a
+    /// background window nor offer a press action for most page elements, but
+    /// scriptable browsers run JavaScript in a tab without coming forward.
+    /// Nil if the browser can't be scripted that way.
+    static func webClick(_ element: AXUIElement, window: WindowInfo, point: CGPoint) async throws -> String? {
+        var web: AXUIElement? = element
+        while let w = web, AX.string(w, kAXRoleAttribute) != "AXWebArea" {
+            web = AX.attr(w, kAXParentAttribute).map { $0 as! AXUIElement }
+        }
+        guard let web, let area = AX.frame(web),
+              let app = NSRunningApplication(processIdentifier: window.pid), let bundle = app.bundleIdentifier,
+              (try? checkAutomation(app)) != nil,
+              let axWindow = AX.window(id: window.id, pid: window.pid, search: true),
+              let title = AX.string(axWindow, kAXTitleAttribute) else { return nil }
+        // Page coordinates: the point on screen, less where the page starts.
+        let x = Int((window.frame.minX + point.x - area.minX).rounded()), y = Int((window.frame.minY + point.y - area.minY).rounded())
+        let js = appleScriptString("""
+        (function(){var x=\(x),y=\(y),el=document.elementFromPoint(x,y);if(!el)return 'nothing';\
+        var o={bubbles:true,cancelable:true,composed:true,view:window,clientX:x,clientY:y,button:0,buttons:1,pointerId:1,isPrimary:true};\
+        el.dispatchEvent(new PointerEvent('pointerdown',o));el.dispatchEvent(new MouseEvent('mousedown',o));\
+        if(el.focus)el.focus();o.buttons=0;\
+        el.dispatchEvent(new PointerEvent('pointerup',o));el.dispatchEvent(new MouseEvent('mouseup',o));el.click();\
+        return el.tagName.toLowerCase()})()
+        """)
+        let (result, _) = try await inBrowserWindow(bundle: bundle, title: title, [
+            "tell active tab to return execute javascript \(js)", "return do JavaScript \(js) in current tab",
+        ])
+        let tag = result.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        return tag.isEmpty || tag.hasPrefix("matches") || tag == "nothing" ? nil : tag
+    }
+
+    /// True if `e` is inside a web page.
+    static func inWebPage(_ e: AXUIElement) -> Bool {
+        var cur: AXUIElement? = e
+        for _ in 0..<40 {
+            guard let c = cur else { return false }
+            if AX.string(c, kAXRoleAttribute) == "AXWebArea" { return true }
+            cur = AX.attr(c, kAXParentAttribute).map { $0 as! AXUIElement }
+        }
+        return false
+    }
+
+    /// Runs AppleScript with osascript and a 15-second limit.
+    static func osascript(_ source: String) async throws -> (out: String, err: String, status: Int32) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", source]
+        let out = Pipe(), err = Pipe()
+        proc.standardOutput = out
+        proc.standardError = err
+        try proc.run()
+        let outData = Task.detached { out.fileHandleForReading.readDataToEndOfFile() }
+        let errData = Task.detached { err.fileHandleForReading.readDataToEndOfFile() }
+        let deadline = Date().addingTimeInterval(15)
+        while proc.isRunning && Date() < deadline { try await Task.sleep(for: .milliseconds(30)) }
+        if proc.isRunning { proc.terminate(); throw ToolError("script timed out after 15s") }
+        func text(_ d: Data) -> String { String(decoding: d, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) }
+        return (text(await outData.value), text(await errData.value), proc.terminationStatus)
     }
 
     /// A URL from "https://…", "file://…", or a plain path.
@@ -972,6 +1135,14 @@ enum Tools {
         }
         let hit = AX.element(at: point, in: window)
         let before = snapshot(of: hit ?? AX.window(id: window.id, pid: window.pid), pid: window.pid)
+        // Web pages in a background browser window: click from inside the page.
+        if method != "mouse", button == .left, count == 1, let hit, inWebPage(hit) {
+            FocusGuard.shared.touch(window.pid, seconds: 5)
+            if let tag = try await webClick(hit, window: window, point: point) {
+                let changed = try await changes(since: before)
+                return .text("clicked \(what) (<\(tag)>) from inside the page\(changed)" + FocusGuard.shared.drainNotes(for: window.pid))
+            }
+        }
         let (_, note) = try await FocusGuard.run(target: window.pid) {
             Input.click(at: point, window: window, button: button, count: count)
         }
@@ -1283,6 +1454,12 @@ enum Tools {
         }
         guard let item = current else { throw ToolError("empty path") }
         let name = path.joined(separator: " > ")
+        // Commands with no window to act on (New Window, New Document, Open)
+        // are the ones that put more windows on the user's screen.
+        // Quitting opens nothing, but not while the user is in the app either.
+        if args.int("window_id") == nil {
+            try Ownership.checkBudget(pid: pid, counting: AX.string(item, kAXMenuItemCmdCharAttribute)?.uppercased() != "Q")
+        }
         if (AX.attr(item, kAXEnabledAttribute) as? Bool) == false {
             // AppKit sends menu commands to the focused window. A background app
             // has none, so commands that act on a document or window (Save, Bold,
@@ -1301,6 +1478,7 @@ enum Tools {
         // Quit can also take a moment: say once the app has actually exited, so
         // the caller doesn't have to check list_apps.
         let windows = try await newWindows(pid: pid, before: before)
+        if windows.isEmpty, args.int("window_id") == nil { Ownership.shared.expectWindow(pid: pid, before: before) }
         let quit = outcome.isEmpty && (app?.isTerminated ?? true) ? " (the app quit)" : outcome
         return .text("chose \(name)\(quit)\(windows)\(note)")
     }
@@ -1513,20 +1691,7 @@ enum Tools {
                 }
             }
             for app in NSWorkspace.shared.runningApplications where named(app) {
-                guard let id = app.bundleIdentifier else { continue }
-                let target = NSAppleEventDescriptor(bundleIdentifier: id)
-                let status = AEDeterminePermissionToAutomateTarget(target.aeDesc, AEEventClass(typeWildCard), AEEventID(typeWildCard), false)
-                let appName = app.localizedName ?? id
-                if status == OSStatus(errAEEventWouldRequireUserConsent) {
-                    throw ToolError("""
-                    not run: controlling \(appName) by script would make macOS show the user a permission dialog \
-                    ("… wants access to control \(appName)"). Use backseat's accessibility tools on \(appName) instead. \
-                    Pass allow_prompt: true only if the user has said they're fine being asked once.
-                    """)
-                }
-                if status == OSStatus(errAEEventNotPermitted) {
-                    throw ToolError("not run: the user hasn't allowed scripting \(appName) (System Settings › Privacy & Security › Automation). Use backseat's accessibility tools instead.")
-                }
+                try checkAutomation(app)
             }
         }
 
@@ -1650,7 +1815,14 @@ enum Tools {
                 // Web pages: not busy, marked loaded, and the page stopped
                 // changing for a moment (a click may not have started loading yet).
                 let webs = webAreas(root)
-                guard !webs.isEmpty else { throw ToolError("\(what) has no web page; use until settled") }
+                // Right after a navigation starts, the old page is gone and the
+                // new one isn't there yet; only give up if none ever shows.
+                if webs.isEmpty {
+                    if elapsed() >= 3000 { throw ToolError("\(what) has no web page; use until settled") }
+                    lastDigest = nil
+                    try await Task.sleep(for: .milliseconds(100))
+                    continue
+                }
                 let busy = webs.contains { (AX.attr($0, "AXElementBusy") as? Bool) == true || (AX.attr($0, "AXLoaded") as? Bool) == false }
                 let d = AX.digest(root, limit: 1500)
                 if busy || d != lastDigest { lastDigest = d; stableSince = Date() }

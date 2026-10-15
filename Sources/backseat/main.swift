@@ -17,13 +17,15 @@ let server = Server(
     backseat drives macOS apps in the background while the user keeps using their Mac. \
     Nothing here moves the user's cursor or takes their keyboard focus. \
     Work in a window of your own: open one (select_menu_item New Window, or launch_app with a url), \
-    keep its window_id, and act only there. Windows you didn't open, and the one the user is in, are theirs; \
+    keep its window_id, and act only there. Every window you open appears on the user's screen, so open one per task \
+    and reuse it: in a browser, go to the next page with launch_app url + window_id, never a new window per page \
+    (backseat allows \(Ownership.maxWindows) open per app). Windows you didn't open, and the one the user is in, are theirs; \
     backseat refuses to act in them unless you pass user_window: true because the user asked. \
     If your window starts showing something you didn't open, or the user moves into it, open a fresh one. \
     Loop: find_elements → click / set_value / type_text on element ids → read_text or get_ui_tree to check \
     (screenshots of windows the user can't see may be out of date). Use wait instead of sleeping. \
     Never repeat a send, submit or delete without first checking it didn't already happen. \
-    Close the windows you opened when done. Use coordinates only when an element isn't in the accessibility tree.
+    Close every window you opened when done (list_windows marks them "yours"). Use coordinates only when an element isn't in the accessibility tree.
     """,
     capabilities: .init(tools: .init(listChanged: false))
 )

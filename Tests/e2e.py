@@ -399,6 +399,31 @@ def full_suite(r):
         m.ok("close_window", window_id=int(extra))
     r.check("opening a window leaves the app's main window as it was", main_window_kept)
 
+    def window_budget():
+        # An agent that opens a window per step fills the user's screen. After a
+        # few, backseat refuses until the agent closes or reuses one.
+        # A slow app's window can show up after the reply, so collect them at the end.
+        extras = lambda: re.findall(r'window (\d+) .*"Fixture Extra"', m.ok("list_windows", pid=pid))
+        try:
+            for _ in range(6):
+                res, text = m.call("select_menu_item", pid=pid, path=["Fixture", "New Window"])
+                if res.get("isError"):
+                    break
+            assert res.get("isError") and "already have" in text, text
+            time.sleep(1)
+            mine = [l for l in m.ok("list_windows", pid=pid).splitlines() if "yours" in l]
+            assert len(mine) == 3, mine
+        finally:
+            time.sleep(1)
+            for w in extras():
+                m.ok("close_window", window_id=int(w))
+        time.sleep(3)  # windows still expected from the refused burst have expired
+        m.ok("select_menu_item", pid=pid, path=["Fixture", "New Window"])
+        assert r.eventually(lambda s: len(extras()) == 1), "couldn't open a window after closing the others"
+        for w in extras():
+            m.ok("close_window", window_id=int(w))
+    r.check("an agent can't keep opening windows", window_budget)
+
     def menus():
         out = m.ok("list_menu", pid=pid, path=["Fixture"])
         assert "Reset Counter" in out and "cmd+r" in out, out
