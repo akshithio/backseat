@@ -112,9 +112,10 @@ final class FocusGuard: @unchecked Sendable {
     /// app comes forward but the user stays on whatever Space the other app
     /// dragged them to (a full-screen window's Space, say). Naming the window
     /// switches back to its Space and makes it key again.
-    private func bringToFront(_ app: NSRunningApplication) {
+    private func bringToFront(_ app: NSRunningApplication, window chosen: CGWindowID? = nil) {
         let pid = app.processIdentifier
-        let window = AX.attr(AX.app(pid), kAXFocusedWindowAttribute).map { $0 as! AXUIElement }.flatMap(AX.windowID)
+        let window = chosen
+            ?? AX.attr(AX.app(pid), kAXFocusedWindowAttribute).map { $0 as! AXUIElement }.flatMap(AX.windowID)
             ?? AX.attr(AX.app(pid), kAXMainWindowAttribute).map { $0 as! AXUIElement }.flatMap(AX.windowID)
             ?? 0
         var psn = ProcessSerialNumber()
@@ -133,10 +134,34 @@ final class FocusGuard: @unchecked Sendable {
         return "\n(" + mine.joined(separator: "; ") + ")"
     }
 
+    /// Keeps the user in `window` of `pid`, the app they're using, for a couple
+    /// of seconds. A command can put a different window of that app in front
+    /// (a new window of the app you're in opens in front of you, and on a Space
+    /// of its own if it's full screen): no app activation happens, so `activated`
+    /// never sees it. Put the user straight back unless they moved themselves.
+    func holdWindow(pid: pid_t, window: CGWindowID) {
+        let start = Date()
+        for delay in [0.03, 0.08, 0.15, 0.3, 0.5, 0.8, 1.2, 2.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, !Self.userActed(since: start),
+                      let app = NSRunningApplication(processIdentifier: pid), app.isActive, !app.isTerminated,
+                      let now = Ownership.userWindow(pid: pid), now != window,
+                      AX.window(id: window, pid: pid) != nil else { return }
+                self.bringToFront(app, window: window)
+                self.lock.lock()
+                self.notes[pid, default: []].append("another \(app.localizedName ?? "app") window came in front of the user's; they were put straight back in their own")
+                self.lock.unlock()
+            }
+        }
+    }
+
     /// Runs an action against `target` with the guard armed for it.
     static func run<T>(target: pid_t, _ body: () async throws -> T) async throws -> (T, String) {
         shared.touch(target)
+        // If the user is in this app, remember their window to keep them in it.
+        let userWindow = Ownership.userWindow(pid: target)
         let result = try await body()
+        if let userWindow { shared.holdWindow(pid: target, window: userWindow) }
         // Give a self-activation triggered by the action time to arrive and be undone.
         try? await Task.sleep(for: .milliseconds(60))  // activations land within ~25ms
         return (result, shared.drainNotes(for: target))

@@ -395,6 +395,7 @@ enum Tools {
         // If the app is already running, only windows this launch opens are the agent's.
         let running = NSWorkspace.shared.runningApplications.first { $0.bundleURL?.standardizedFileURL == url.standardizedFileURL }
         let before = running.map { Set(Windows.list(pid: $0.processIdentifier).map(\.id)) }
+        let userWindow = running.flatMap { Ownership.userWindow(pid: $0.processIdentifier) }
         let app: NSRunningApplication
         if let document {
             app = try await NSWorkspace.shared.open([document], withApplicationAt: url, configuration: config)
@@ -402,6 +403,7 @@ enum Tools {
             app = try await NSWorkspace.shared.openApplication(at: url, configuration: config)
         }
         FocusGuard.shared.touch(app.processIdentifier, seconds: 8)
+        if let userWindow { FocusGuard.shared.holdWindow(pid: app.processIdentifier, window: userWindow) }
 
         var windows: [WindowInfo] = []
         for _ in 0..<40 {
@@ -450,7 +452,7 @@ enum Tools {
         }
         if let wid = args.int("window_id") {
             let info = try Windows.get(CGWindowID(wid))
-            guard let w = AX.window(id: info.id, pid: info.pid) else {
+            guard let w = AX.window(id: info.id, pid: info.pid, search: true) else {
                 throw ToolError("window \(wid) isn't one of the app's own windows; sheets and dialogs live inside their parent window's tree, so use list_windows with pid and the parent's id")
             }
             try Ownership.check(window: info.id, pid: info.pid, args, reading: true)
@@ -1504,6 +1506,7 @@ enum Tools {
         for pid in pids { FocusGuard.shared.touch(pid, seconds: timeout + 2) }
         // Windows the script opens are the agent's; so is an app it launches.
         let windowsBefore = Dictionary(uniqueKeysWithValues: pids.map { ($0, Set(Windows.list(pid: $0).map(\.id))) })
+        let userWindows = pids.compactMap { pid in Ownership.userWindow(pid: pid).map { (pid, $0) } }
         defer {
             for app in NSWorkspace.shared.runningApplications where named(app) {
                 if let before = windowsBefore[app.processIdentifier] {
@@ -1538,6 +1541,7 @@ enum Tools {
             throw ToolError("script timed out after \(Int(timeout))s (the app may be waiting on a dialog, or on the user to allow automation)")
         }
         try? await Task.sleep(for: .milliseconds(60))
+        for (pid, window) in userWindows { FocusGuard.shared.holdWindow(pid: pid, window: window) }
         let notes = pids.map { FocusGuard.shared.drainNotes(for: $0) }.joined()
         let result = String(decoding: await outData.value, as: UTF8.self)
             .replacingOccurrences(of: "\r", with: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1555,7 +1559,7 @@ enum Tools {
         let wid = CGWindowID(try args.require("window_id", args.int))
         let info = try Windows.get(wid)
         try Ownership.check(window: wid, pid: info.pid, args)
-        guard let w = AX.window(id: wid, pid: info.pid) else { throw ToolError("window \(wid) isn't one of \(info.app)'s windows") }
+        guard let w = AX.window(id: wid, pid: info.pid, search: true) else { throw ToolError("window \(wid) isn't one of \(info.app)'s windows") }
         guard let button = AX.attr(w, kAXCloseButtonAttribute).map({ $0 as! AXUIElement }) else {
             throw ToolError("window \(wid) has no close button")
         }

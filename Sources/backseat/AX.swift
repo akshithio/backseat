@@ -92,15 +92,45 @@ enum AX {
         return _AXUIElementGetWindow(e, &id) == .success && id != 0 ? id : nil
     }
 
-    static func window(id: CGWindowID, pid: pid_t) -> AXUIElement? {
-        windows(pid).first { windowID($0) == id }
+    /// `search`: when a tool asks for this one window, keep looking for it
+    /// longer if the quick lookup misses (never while listing many windows).
+    static func window(id: CGWindowID, pid: pid_t, search: Bool = false) -> AXUIElement? {
+        if let w = windows(pid).first(where: { windowID($0) == id }) { return w }
+        guard search, Windows.all(includeOffscreen: true).contains(where: { $0.id == id && $0.pid == pid }) else { return nil }
+        let w = windowsOnOtherSpaces(pid, budget: 3, upTo: 200_000, stopAt: id).first { windowID($0) == id }
+        if let w { remember([w], pid: pid) }
+        return w
+    }
+
+    /// Window elements seen before, by pid. A window on another Space drops out
+    /// of the app's window list; one seen earlier (while it was focused, right
+    /// after it opened) stays reachable through the element already in hand.
+    nonisolated(unsafe) private static var seenWindows: [pid_t: [CGWindowID: AXUIElement]] = [:]
+    private static let seenLock = NSLock()
+
+    private static func remember(_ windows: [AXUIElement], pid: pid_t) {
+        seenLock.lock(); defer { seenLock.unlock() }
+        for w in windows { if let id = windowID(w) { seenWindows[pid, default: [:]][id] = w } }
+    }
+
+    private static func remembered(_ pid: pid_t) -> [CGWindowID: AXUIElement] {
+        seenLock.lock(); defer { seenLock.unlock() }
+        return seenWindows[pid] ?? [:]
     }
 
     /// All of an app's windows, including ones on other Spaces.
     static func windows(_ pid: pid_t) -> [AXUIElement] {
         var result = elements(app(pid), kAXWindowsAttribute)
+        defer { remember(result, pid: pid) }
         var seen = Set(result.compactMap(windowID))
         let cgIDs = Set(Windows.all(includeOffscreen: true).filter { $0.pid == pid }.map(\.id))
+        if cgIDs.isSubset(of: seen) { return result }
+        for (id, w) in remembered(pid) where cgIDs.contains(id) && !seen.contains(id) {
+            var role: AnyObject?
+            guard AXUIElementCopyAttributeValue(w, kAXRoleAttribute as CFString, &role) == .success else { continue }
+            result.append(w)
+            seen.insert(id)
+        }
         if cgIDs.isSubset(of: seen) { return result }
         // kAXWindowsAttribute only covers the current Space. The focused and
         // main windows are still reachable from elsewhere, and touching them
@@ -122,19 +152,38 @@ enum AX {
     /// Windows on other Spaces that the app has already vended elements for
     /// are reachable by constructing their remote tokens directly, the same
     /// trick AltTab uses: pid, 0, 'coco', element id.
-    private static func windowsOnOtherSpaces(_ pid: pid_t) -> [AXUIElement] {
+    nonisolated(unsafe) private static var recentScans: [pid_t: (at: Date, windows: [AXUIElement])] = [:]
+    private static let scanLock = NSLock()
+
+    /// Apps with big accessibility trees (browsers) hand out element ids far
+    /// past the default range; a search for one known window goes further.
+    private static func windowsOnOtherSpaces(_ pid: pid_t, budget: TimeInterval = 0.5, upTo limit: UInt64 = 2000,
+                                             stopAt wanted: CGWindowID? = nil) -> [AXUIElement] {
         var token = Data(count: 20)
         token.withUnsafeMutableBytes { buf in
             buf.storeBytes(of: pid, toByteOffset: 0, as: pid_t.self)
             buf.storeBytes(of: Int32(0), toByteOffset: 4, as: Int32.self)
             buf.storeBytes(of: Int32(0x636f_636f), toByteOffset: 8, as: Int32.self)
         }
+        // Listing windows asks once per window; reuse a scan from a moment ago.
+        if wanted == nil {
+            scanLock.lock()
+            let recent = recentScans[pid]
+            scanLock.unlock()
+            if let recent, Date().timeIntervalSince(recent.at) < 2 { return recent.windows }
+        }
         var found: [AXUIElement] = []
-        let deadline = Date().addingTimeInterval(0.5)
-        for elementID: UInt64 in 0..<2000 {
+        defer {
+            if wanted == nil { scanLock.lock(); recentScans[pid] = (Date(), found); scanLock.unlock() }
+        }
+        let deadline = Date().addingTimeInterval(budget)
+        for elementID: UInt64 in 0..<limit {
             token.withUnsafeMutableBytes { $0.storeBytes(of: elementID, toByteOffset: 12, as: UInt64.self) }
             guard let e = _AXUIElementCreateWithRemoteToken(token as CFData)?.takeRetainedValue() else { continue }
-            if string(e, kAXRoleAttribute) == kAXWindowRole { found.append(e) }
+            if string(e, kAXRoleAttribute) == kAXWindowRole {
+                found.append(e)
+                if let wanted, windowID(e) == wanted { break }
+            }
             if Date() > deadline { break }
         }
         return found
