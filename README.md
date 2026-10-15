@@ -22,6 +22,7 @@ Nothing backseat does activates the target app. Activation is what takes your ke
 - **Replies say what happened.** `click` and `perform_action` report what changed afterwards: a menu that opened (with its items' ids), new windows, a sheet, a new title, changed contents, or no visible change. `find_elements` points a bare label (sidebar text, a button's caption) at the row or control to act on, and clicking the label acts on that. `set_value` confirms the whole value landed, and trees say how many characters they cut.
 - **Waiting on real conditions.** `wait` returns when a web page has finished loading (with its title and URL), when a window stops changing, or when text appears or disappears.
 - **Content before chrome.** `read_text` gives the page or document first, then sidebars, then window and browser controls, so `max_chars` is spent on what matters.
+- **The agent's windows, not yours.** backseat tracks the windows an agent opened (and every window of an app it launched). Acting in any other window, or in the one you're working in, is refused unless the agent says you asked for that window (`user_window`). Apps that move tabs or documents between windows can't trick an agent into driving yours.
 - **Agents know the layout.** `list_windows` says where each window is: on the user's Space or another (full-screen) one, minimized, app hidden, showing a dialog, a dialog window itself (an Open panel, an alert), or the user's focused window.
 
 ### Limitation
@@ -38,6 +39,10 @@ A second macOS user, left logged in in the background, has its own active app an
 4. In the main user's Claude Code: `claude mcp add -s user backseat-agent -- /Users/Shared/backseat/backseat connect /Users/Shared/backseat/agent.sock`
 
 `backseat listen` serves only the main user's uid (checked per connection) and starts one backseat per connection; `backseat connect` relays MCP over the socket unchanged.
+
+## Skill
+
+[`skills/backseat/SKILL.md`](skills/backseat/SKILL.md) teaches agents to work alongside you: open their own windows, check results in the accessibility tree, never repeat a send without checking, never take your focus. The installer adds it to Claude Code; with other tools, `npx skills add akshithio/backseat`. The same rules ship in the MCP server's instructions.
 
 ## Tools
 

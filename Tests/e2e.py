@@ -369,6 +369,23 @@ def full_suite(r):
         assert out.index("count:") < out.index("— window controls —"), out
     r.check("read_text puts window controls after content", text_order)
 
+    def someone_elses_window():
+        # A second backseat is a different agent: it didn't open the fixture, so
+        # to it that's one of the user's windows. It may read it but not act in
+        # it, unless it says the user asked for that window (user_window).
+        other = MCP(os.path.join(BIN, "backseat"))
+        try:
+            clicks = r.state()["clicks"]
+            res, text = other.call("click", window_id=wid, x=px + 5, y=py + 5)
+            assert res.get("isError") and "one of the user's" in text, text
+            assert r.state()["clicks"] == clicks, "it clicked anyway"
+            assert "count:" in other.ok("read_text", window_id=wid)
+            out = other.ok("click", window_id=wid, x=px + 5, y=py + 5, user_window=True)
+            assert "clicked" in out, out
+        finally:
+            other.close()
+    r.check("an agent never acts in a window it didn't open", someone_elses_window)
+
     def menus():
         out = m.ok("list_menu", pid=pid, path=["Fixture"])
         assert "Reset Counter" in out and "cmd+r" in out, out

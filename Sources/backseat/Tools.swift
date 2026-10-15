@@ -32,6 +32,7 @@ private func prop(_ type: String, _ description: String) -> Value {
 private let windowID = prop("integer", "Window id from list_windows.")
 private let elementID = prop("string", "Element id (e.g. \"e12\") from get_ui_tree or find_elements.")
 private let pidProp = prop("integer", "Process id from list_apps or list_windows.")
+private let userWindow = prop("boolean", "Act in (or read) one of the user's own windows or the window they're working in. Only when the user asked for that window; otherwise work in a window you opened. Default false.")
 
 enum Tools {
     static let all: [Tool] = [
@@ -75,6 +76,7 @@ enum Tools {
             Prefer acting on element ids over coordinates: it is faster, exact, and works in covered windows.
             """,
             inputSchema: schema([
+                "user_window": userWindow,
                 "window_id": windowID,
                 "pid": prop("integer", "Use this app's main window when window_id is not given."),
                 "element_id": prop("string", "Only the subtree under this element."),
@@ -88,6 +90,7 @@ enum Tools {
             name: "find_elements",
             description: "Search a window's accessibility tree for elements whose label or value contains `text` and/or whose role matches `role`.",
             inputSchema: schema([
+                "user_window": userWindow,
                 "window_id": windowID,
                 "pid": prop("integer", "Use this app's main window when window_id is not given."),
                 "text": prop("string", "Case-insensitive substring of label or value."),
@@ -99,13 +102,15 @@ enum Tools {
         Tool(
             name: "element_info",
             description: "All accessibility attributes and actions of one element.",
-            inputSchema: schema(["element_id": elementID], required: ["element_id"]),
+            inputSchema: schema([
+                "user_window": userWindow,"element_id": elementID], required: ["element_id"]),
             annotations: .init(readOnlyHint: true)
         ),
         Tool(
             name: "perform_action",
             description: "Perform an accessibility action on an element without moving the cursor: press, increment, decrement, confirm, cancel, pick, raise, showMenu.",
             inputSchema: schema([
+                "user_window": userWindow,
                 "element_id": elementID,
                 "action": prop("string", "Default press."),
                 "force": prop("boolean", "Allow showMenu, which pops a menu up on the user's screen."),
@@ -115,6 +120,7 @@ enum Tools {
             name: "set_value",
             description: "Set an element's value directly (text fields, sliders, checkboxes, steppers). Can also set another attribute, e.g. AXFocused or AXSelected.",
             inputSchema: schema([
+                "user_window": userWindow,
                 "element_id": elementID,
                 "value": prop("string", "New value. Numbers and true/false are converted when the attribute needs them; ranges (e.g. AXSelectedTextRange) take \"location,length\"."),
                 "attribute": prop("string", "Default AXValue."),
@@ -128,6 +134,7 @@ enum Tools {
             key events to the app's process only. Neither touches the user's keyboard focus.
             """,
             inputSchema: schema([
+                "user_window": userWindow,
                 "text": prop("string", "Text to type. In keys mode \\n presses Return."),
                 "element_id": prop("string", "Element to type into; it becomes the app's focused element."),
                 "pid": prop("integer", "Type into this app's focused element."),
@@ -138,6 +145,7 @@ enum Tools {
             name: "press_key",
             description: "Send a key or shortcut (e.g. return, escape, cmd+s, shift+tab) to one app's process only.",
             inputSchema: schema([
+                "user_window": userWindow,
                 "key": prop("string", "Key name with optional modifiers joined by +."),
                 "pid": pidProp,
                 "window_id": prop("integer", "Alternative to pid."),
@@ -155,6 +163,7 @@ enum Tools {
             window-relative points, the same space as screenshot at scale 1.
             """,
             inputSchema: schema([
+                "user_window": userWindow,
                 "element_id": elementID,
                 "element_ids": .object(["type": "array", "items": .object(["type": "string"]), "description": "Press several elements in order (e.g. calculator keys), in one call."]),
                 "window_id": windowID,
@@ -170,6 +179,7 @@ enum Tools {
             name: "drag",
             description: "Drag with the left button between two window-relative points, delivered to that window only.",
             inputSchema: schema([
+                "user_window": userWindow,
                 "window_id": windowID,
                 "from_x": prop("number", ""), "from_y": prop("number", ""),
                 "to_x": prop("number", ""), "to_y": prop("number", ""),
@@ -179,6 +189,7 @@ enum Tools {
             name: "scroll",
             description: "Scroll at a window-relative point (or an element). Uses the scroll area's scroll bars through accessibility when possible, otherwise wheel events to that window only. Negative dy scrolls down; values are points.",
             inputSchema: schema([
+                "user_window": userWindow,
                 "window_id": windowID,
                 "element_id": elementID,
                 "x": prop("number", ""), "y": prop("number", ""),
@@ -197,6 +208,7 @@ enum Tools {
             screenshot can be out of date; the accessibility tree is always current.
             """,
             inputSchema: schema([
+                "user_window": userWindow,
                 "window_id": windowID,
                 "as_seen": prop("boolean", "Capture the window's region of the user's screen as they see it, outline included. Only for windows visible on the user's current Space."),
                 "scale": prop("number", "Pixels per point. Default 1; use 2 for Retina detail."),
@@ -208,6 +220,7 @@ enum Tools {
             name: "select_menu_item",
             description: "Choose an item from an app's menu bar by path, e.g. [\"File\", \"New Window\"], without opening the menu on screen. Commands that only work while their app is active (Save, Bold, New Folder…) work too: backseat lends the app focus for a few dozen milliseconds without raising its windows or switching the user's Space, then gives it back. Reports any windows the command opened.",
             inputSchema: schema([
+                "user_window": userWindow,
                 "pid": pidProp,
                 "window_id": prop("integer", "For commands that act on a window (Bold, Save…): the window to act on. Default: the app's main window."),
                 "path": .object(["type": "array", "items": .object(["type": "string"]), "description": "Menu titles from the menu bar down. Matching ignores case and a trailing …"]),
@@ -226,6 +239,7 @@ enum Tools {
             name: "read_text",
             description: "The readable text of a window or element: headings marked with #, links as [text], field values, buttons as ‹label›. The page or document comes first, then sidebars, then window and browser controls, so max_chars never fills up with toolbar buttons. Good for web pages and documents.",
             inputSchema: schema([
+                "user_window": userWindow,
                 "window_id": windowID,
                 "element_id": prop("string", "Only text under this element."),
                 "max_chars": prop("integer", "Default 6000."),
@@ -235,12 +249,14 @@ enum Tools {
         Tool(
             name: "close_window",
             description: "Close a window with its own close button, without touching the app's other windows. The app may show a save sheet; check the window afterwards.",
-            inputSchema: schema(["window_id": windowID], required: ["window_id"])
+            inputSchema: schema([
+                "user_window": userWindow,"window_id": windowID], required: ["window_id"])
         ),
         Tool(
             name: "wait",
             description: "Wait until something happens in a window: text appears (text), text disappears (until gone), a web page finishes loading (until loaded), or the window stops changing (until settled). With neither, just sleeps ms.",
             inputSchema: schema([
+                "user_window": userWindow,
                 "ms": prop("integer", "Maximum time to wait. Default 10000 with a condition, 1000 without."),
                 "window_id": windowID,
                 "pid": prop("integer", "Use this app's main window when window_id is not given."),
@@ -376,6 +392,9 @@ enum Tools {
         // Several apps (Safari, System Settings) bring themselves forward while
         // launching even when asked not to; the guard hands focus straight back.
         FocusGuard.shared.expectLaunch(of: url)
+        // If the app is already running, only windows this launch opens are the agent's.
+        let running = NSWorkspace.shared.runningApplications.first { $0.bundleURL?.standardizedFileURL == url.standardizedFileURL }
+        let before = running.map { Set(Windows.list(pid: $0.processIdentifier).map(\.id)) }
         let app: NSRunningApplication
         if let document {
             app = try await NSWorkspace.shared.open([document], withApplicationAt: url, configuration: config)
@@ -387,8 +406,15 @@ enum Tools {
         var windows: [WindowInfo] = []
         for _ in 0..<40 {
             windows = Windows.list(pid: app.processIdentifier)
-            if !windows.isEmpty { break }
+            if let before {
+                if windows.contains(where: { !before.contains($0.id) }) || document == nil { break }
+            } else if !windows.isEmpty { break }
             try await Task.sleep(for: .milliseconds(125))
+        }
+        if let before {
+            Ownership.shared.claim(windows.map(\.id).filter { !before.contains($0) })
+        } else {
+            Ownership.shared.claimApp(app.processIdentifier)
         }
         keepUserOnTop(windows)
         let list = windows.map(\.line).joined(separator: "\n")
@@ -417,6 +443,7 @@ enum Tools {
     private static func root(_ args: Args) throws -> (AXUIElement, CGPoint, String) {
         if let eid = args.string("element_id") {
             let e = try ElementStore.shared.get(eid)
+            try Ownership.check(window: Ownership.window(of: e), pid: AX.pid(e), args, reading: true)
             let win = AX.containingWindow(e)
             let origin = win.flatMap(AX.frame)?.origin ?? .zero
             return (e, origin, "subtree of \(eid)")
@@ -426,6 +453,7 @@ enum Tools {
             guard let w = AX.window(id: info.id, pid: info.pid) else {
                 throw ToolError("window \(wid) isn't one of the app's own windows; sheets and dialogs live inside their parent window's tree, so use list_windows with pid and the parent's id")
             }
+            try Ownership.check(window: info.id, pid: info.pid, args, reading: true)
             Overlay.shared.highlight(info.id)
             return (w, AX.frame(w)?.origin ?? info.frame.origin, "window \(wid) (\(info.app))")
         }
@@ -434,6 +462,7 @@ enum Tools {
             let w = (AX.attr(app, kAXMainWindowAttribute) ?? AX.attr(app, kAXFocusedWindowAttribute)).map { $0 as! AXUIElement }
                 ?? AX.windows(pid_t(pid)).first
             guard let w else { throw ToolError("pid \(pid) has no accessible windows") }
+            try Ownership.check(window: AX.windowID(w), pid: pid_t(pid), args, reading: true)
             let id = AX.windowID(w).map { "window \($0)" } ?? "main window"
             return (w, AX.frame(w)?.origin ?? .zero, "\(id) of pid \(pid)")
         }
@@ -507,6 +536,7 @@ enum Tools {
 
     static func elementInfo(_ args: Args) throws -> Output {
         let e = try ElementStore.shared.get(try args.require("element_id", args.string))
+        try Ownership.check(window: Ownership.window(of: e), pid: AX.pid(e), args, reading: true)
         var names: CFArray?
         AXUIElementCopyAttributeNames(e, &names)
         var lines: [String] = ["pid=\(AX.pid(e))" + (AX.attr(e, kAXWindowAttribute).flatMap { AX.windowID($0 as! AXUIElement) }.map { " window=\($0)" } ?? "")]
@@ -537,6 +567,7 @@ enum Tools {
     static func performAction(_ args: Args) async throws -> Output {
         let id = try args.require("element_id", args.string)
         let e = try ElementStore.shared.get(id)
+        try Ownership.check(window: Ownership.window(of: e), pid: AX.pid(e), args)
         let action = AX.resolveAction(args.string("action") ?? "press", on: e)
         if action == kAXPressAction { try AX.checkReachable(e, what: describe(e, id)) }
         if action == "AXShowMenu" && args.bool("force") != true {
@@ -560,6 +591,7 @@ enum Tools {
     static func setValue(_ args: Args) async throws -> Output {
         let id = try args.require("element_id", args.string)
         let e = try ElementStore.shared.get(id)
+        try Ownership.check(window: Ownership.window(of: e), pid: AX.pid(e), args)
         let attribute = args.string("attribute").map { $0.hasPrefix("AX") ? $0 : axAction($0) } ?? kAXValueAttribute
         let raw = args.raw["value"]
         let text: String
@@ -655,6 +687,7 @@ enum Tools {
         } else {
             throw ToolError("pass element_id or pid")
         }
+        try Ownership.check(window: element.flatMap(Ownership.window(of:)), pid: pid, args)
 
         let (how, note) = try await FocusGuard.run(target: pid) { () -> String in
             if let element, args.string("element_id") != nil,
@@ -732,11 +765,15 @@ enum Tools {
         if let id = args.string("element_id") {
             let e = try ElementStore.shared.get(id)
             pid = AX.pid(e)
+            try Ownership.check(window: Ownership.window(of: e), pid: pid, args)
             AXUIElementSetAttributeValue(e, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         } else if let p = args.int("pid") {
             pid = pid_t(p)
+            let focused = AX.attr(AX.app(pid), kAXFocusedWindowAttribute).map { $0 as! AXUIElement }.flatMap(AX.windowID)
+            try Ownership.check(window: focused, pid: pid, args)
         } else if let w = args.int("window_id") {
             pid = try Windows.get(CGWindowID(w)).pid
+            try Ownership.check(window: CGWindowID(w), pid: pid, args)
         } else {
             throw ToolError("pass pid, window_id, or element_id")
         }
@@ -838,10 +875,12 @@ enum Tools {
             guard let axw = AX.containingWindow(e), let wid = AX.windowID(axw), let origin = AX.frame(axw)?.origin else {
                 throw ToolError("can't find the window containing \(id)")
             }
+            try Ownership.check(window: wid, pid: AX.pid(e), args)
             return (try Windows.get(wid), CGPoint(x: frame.midX - origin.x, y: frame.midY - origin.y), describe(e, id))
         }
         guard let wid = args.int("window_id") else { throw ToolError("pass element_id, or window_id with x and y") }
         let window = try Windows.get(CGWindowID(wid))
+        try Ownership.check(window: window.id, pid: window.pid, args)
         let x = try args.require(xKey, args.number), y = try args.require(yKey, args.number)
         Overlay.shared.highlight(window.id)
         return (window, CGPoint(x: x, y: y), "(\(Int(x)),\(Int(y))) in window \(wid)")
@@ -864,6 +903,7 @@ enum Tools {
             var note = ""
             for id in ids {
                 let e = try ElementStore.shared.get(id)
+                try Ownership.check(window: Ownership.window(of: e), pid: AX.pid(e), args)
                 try AX.checkReachable(e, what: describe(e, id))
                 let (outcome, n) = try await FocusGuard.run(target: AX.pid(e)) {
                     try AX.press(e, "press on \(describe(e, id)) after pressing \(done.count) of \(ids.count)")
@@ -928,6 +968,7 @@ enum Tools {
     private static func pressTarget(_ args: Args) throws -> (AXUIElement, String, String)? {
         if let id = args.string("element_id") {
             let e = try ElementStore.shared.get(id)
+            try Ownership.check(window: Ownership.window(of: e), pid: AX.pid(e), args)
             guard let (target, how) = AX.actionable(e) else { return nil }
             let what = CFEqual(target, e) ? describe(e, id)
                 : "\(describe(target, ElementStore.shared.add(target))), the \(how == "select" ? "row" : "control") containing \(id)"
@@ -992,6 +1033,7 @@ enum Tools {
             }
             let opened = Windows.list(pid: b.pid).filter { !b.windows.contains($0.id) }
             if !opened.isEmpty {
+                Ownership.shared.claim(opened.map(\.id))
                 keepUserOnTop(opened)
                 out.append("new window(s):\n" + opened.map(\.line).joined(separator: "\n"))
             }
@@ -1067,6 +1109,7 @@ enum Tools {
 
     static func screenshot(_ args: Args) async throws -> Output {
         let wid = CGWindowID(try args.require("window_id", args.int))
+        try Ownership.check(window: wid, pid: try Windows.get(wid).pid, args, reading: true)
         let scale = args.number("scale") ?? 1
         let shot = args.bool("as_seen") == true
             ? try Capture.asSeen(wid, scale: scale, format: args.string("format") ?? "png")
@@ -1090,7 +1133,7 @@ enum Tools {
         for _ in 0..<12 {
             if app?.isTerminated ?? true { break }
             opened = Windows.list(pid: pid).filter { !before.contains($0.id) }
-            if !opened.isEmpty { break }
+            if !opened.isEmpty { Ownership.shared.claim(opened.map(\.id)); break }
             try await Task.sleep(for: .milliseconds(40))
         }
         keepUserOnTop(opened)
@@ -1180,6 +1223,7 @@ enum Tools {
         let pid = pid_t(try args.require("pid", args.int))
         let path = try args.require("path", args.strings)
         guard !path.isEmpty else { throw ToolError("path is empty") }
+        if let w = args.int("window_id") { try Ownership.check(window: CGWindowID(w), pid: pid, args) }
         guard let bar = AX.attr(AX.app(pid), kAXMenuBarAttribute).map({ $0 as! AXUIElement }) else {
             throw ToolError("pid \(pid) has no menu bar")
         }
@@ -1432,7 +1476,9 @@ enum Tools {
                     config.activates = false
                     config.addsToRecentItems = false
                     FocusGuard.shared.expectLaunch(of: url)
-                    _ = try? await NSWorkspace.shared.openApplication(at: url, configuration: config)
+                    if let launched = try? await NSWorkspace.shared.openApplication(at: url, configuration: config) {
+                        Ownership.shared.claimApp(launched.processIdentifier)
+                    }
                 }
             }
             for app in NSWorkspace.shared.runningApplications where named(app) {
@@ -1456,6 +1502,17 @@ enum Tools {
         // Arm the focus guard for every running app the script names.
         let pids = NSWorkspace.shared.runningApplications.filter(named).map(\.processIdentifier)
         for pid in pids { FocusGuard.shared.touch(pid, seconds: timeout + 2) }
+        // Windows the script opens are the agent's; so is an app it launches.
+        let windowsBefore = Dictionary(uniqueKeysWithValues: pids.map { ($0, Set(Windows.list(pid: $0).map(\.id))) })
+        defer {
+            for app in NSWorkspace.shared.runningApplications where named(app) {
+                if let before = windowsBefore[app.processIdentifier] {
+                    Ownership.shared.claim(Windows.list(pid: app.processIdentifier).map(\.id).filter { !before.contains($0) })
+                } else {
+                    Ownership.shared.claimApp(app.processIdentifier)
+                }
+            }
+        }
 
         let proc = Process()
         if shell {
@@ -1497,6 +1554,7 @@ enum Tools {
     static func closeWindow(_ args: Args) async throws -> Output {
         let wid = CGWindowID(try args.require("window_id", args.int))
         let info = try Windows.get(wid)
+        try Ownership.check(window: wid, pid: info.pid, args)
         guard let w = AX.window(id: wid, pid: info.pid) else { throw ToolError("window \(wid) isn't one of \(info.app)'s windows") }
         guard let button = AX.attr(w, kAXCloseButtonAttribute).map({ $0 as! AXUIElement }) else {
             throw ToolError("window \(wid) has no close button")

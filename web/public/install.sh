@@ -33,7 +33,11 @@ BIN="$DIR/.build/release/backseat"
 if command -v claude >/dev/null 2>&1; then
   claude mcp remove -s user backseat >/dev/null 2>&1 || true
   claude mcp add -s user backseat -- "$BIN" >/dev/null
-  echo "added backseat to Claude Code"
+  # The skill teaches agents how to work alongside you (their own windows, never yours).
+  SKILLS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/backseat"
+  mkdir -p "$SKILLS"
+  cp "$DIR/skills/backseat/SKILL.md" "$SKILLS/SKILL.md"
+  echo "added backseat and its skill to Claude Code"
 else
   echo "built $BIN; add it to your MCP client as a stdio server"
 fi
