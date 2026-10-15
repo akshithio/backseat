@@ -472,6 +472,14 @@ def full_suite(r):
             assert res.get("isError") and "refused" in text, (bad, text)
     r.check("run_script runs scripts and refuses ones that take focus", scripts)
 
+    def no_permission_dialog():
+        # Nobody has allowed scripting the fixture, so sending it Apple Events
+        # would pop macOS's "wants access to control" dialog. backseat asks macOS
+        # without prompting and refuses instead. (If it was allowed, it just runs.)
+        res, text = m.call("run_script", script='tell application "BackseatFixture" to get name')
+        assert (res.get("isError") and "permission dialog" in text) or "BackseatFixture" in text, text
+    r.check("run_script never sets off a permission dialog", no_permission_dialog)
+
     def shell_and_structure():
         assert m.ok("run_script", script="printf 'a\\nb'", language="shell") == "a\nb"
         out = m.ok("run_script", script='return {"x", {1, 2}}')

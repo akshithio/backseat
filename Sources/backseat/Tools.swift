@@ -277,6 +277,7 @@ enum Tools {
                 "script": prop("string", "The script source."),
                 "language": prop("string", "applescript (default), javascript, or shell (zsh: list, move and read files without AppleScript)."),
                 "timeout": prop("number", "Seconds before giving up. Default 20."),
+                "allow_prompt": prop("boolean", "Run even if macOS would first ask the user to allow scripting that app. Default false: such scripts are refused so no permission dialog appears."),
             ], required: ["script"])
         ),
     ]
@@ -1406,11 +1407,48 @@ enum Tools {
         if lower.contains("system events") && lower.range(of: #"\bclick\b"#, options: .regularExpression) != nil {
             throw ToolError("refused: clicking through System Events moves the user's real pointer focus. Use click on an element instead.")
         }
+        // The apps the script addresses: application "Name", application id "com.x",
+        // Application("Name") in JavaScript.
+        let names = Set(script.matches(of: #/(?:application|app|Application)\s*(?:id\s*)?\(?\s*"([^"]+)"/#).map { String($0.output.1).lowercased() })
+        func named(_ a: NSRunningApplication) -> Bool {
+            names.contains((a.localizedName ?? "").lowercased()) || names.contains((a.bundleIdentifier ?? "").lowercased())
+        }
+        // Controlling another app with Apple Events needs the user's permission,
+        // and macOS asks with a dialog on their screen the first time, for each
+        // app. Never set that dialog off: ask macOS first, without prompting.
+        if !shell || lower.contains("osascript"), args.bool("allow_prompt") != true {
+            for name in names where !NSWorkspace.shared.runningApplications.contains(where: {
+                ($0.localizedName ?? "").lowercased() == name || ($0.bundleIdentifier ?? "").lowercased() == name
+            }) {
+                // The check needs the app running; start it in the background.
+                if let url = appURL(named: name) ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: name) {
+                    let config = NSWorkspace.OpenConfiguration()
+                    config.activates = false
+                    config.addsToRecentItems = false
+                    FocusGuard.shared.expectLaunch(of: url)
+                    _ = try? await NSWorkspace.shared.openApplication(at: url, configuration: config)
+                }
+            }
+            for app in NSWorkspace.shared.runningApplications where named(app) {
+                guard let id = app.bundleIdentifier else { continue }
+                let target = NSAppleEventDescriptor(bundleIdentifier: id)
+                let status = AEDeterminePermissionToAutomateTarget(target.aeDesc, AEEventClass(typeWildCard), AEEventID(typeWildCard), false)
+                let appName = app.localizedName ?? id
+                if status == OSStatus(errAEEventWouldRequireUserConsent) {
+                    throw ToolError("""
+                    not run: controlling \(appName) by script would make macOS show the user a permission dialog \
+                    ("… wants access to control \(appName)"). Use backseat's accessibility tools on \(appName) instead. \
+                    Pass allow_prompt: true only if the user has said they're fine being asked once.
+                    """)
+                }
+                if status == OSStatus(errAEEventNotPermitted) {
+                    throw ToolError("not run: the user hasn't allowed scripting \(appName) (System Settings › Privacy & Security › Automation). Use backseat's accessibility tools instead.")
+                }
+            }
+        }
+
         // Arm the focus guard for every running app the script names.
-        let names = Set(script.matches(of: #/(?:application|app|Application)\s*\(?\s*"([^"]+)"/#).map { String($0.output.1).lowercased() })
-        let pids = NSWorkspace.shared.runningApplications.filter {
-            names.contains(($0.localizedName ?? "").lowercased()) || names.contains(($0.bundleIdentifier ?? "").lowercased())
-        }.map(\.processIdentifier)
+        let pids = NSWorkspace.shared.runningApplications.filter(named).map(\.processIdentifier)
         for pid in pids { FocusGuard.shared.touch(pid, seconds: timeout + 2) }
 
         let proc = Process()
