@@ -11,6 +11,7 @@ run while you're using the Mac.
 
     swift build && python3 Tests/e2e.py              # everything that's invisible to the user
     swift build && python3 Tests/e2e.py --outline    # also check the green outline (shows briefly)
+    swift build && python3 Tests/e2e.py --focus      # also check focus hand-back (takes focus briefly)
 """
 import base64, json, os, plistlib, re, shutil, struct, subprocess, sys, tempfile, time
 
@@ -590,7 +591,10 @@ def other_space_suite(r):
         if r.state()["spaceMode"] == "opened on a Space the user isn't on":
             assert r.eventually(lambda s: s["onActiveSpace"] is False, timeout=1), "user was left on the app's Space"
         print(f"      (handed back in under {1.5 - (deadline - time.time()):.2f}s)")
-    r.check("app that activates itself hands focus and Space back", self_activation_undone, activates=True)
+    # This one makes the fixture take the user's focus on purpose (for a moment),
+    # so it only runs when asked for.
+    if "--focus" in sys.argv:
+        r.check("app that activates itself hands focus and Space back", self_activation_undone, activates=True)
 
 
 def outline_suite(r):
