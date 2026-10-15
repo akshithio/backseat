@@ -13,9 +13,28 @@ final class Ownership: @unchecked Sendable {
     private let lock = NSLock()
     private var windows: Set<CGWindowID> = []
     private var apps: Set<pid_t> = []
+    /// Apps where a command may have opened a window that hasn't shown up yet.
+    private var pending: [pid_t: [(until: Date, before: Set<CGWindowID>)]] = [:]
+
+    /// A command that can open a window in `pid` ran, and none has shown up
+    /// yet: count one more for a few seconds, so quick calls can't outrun the
+    /// window budget while a slow app is still building the window.
+    func expectWindow(pid: pid_t, before: Set<CGWindowID>) {
+        lock.lock(); pending[pid, default: []].append((Date().addingTimeInterval(3), before)); lock.unlock()
+    }
 
     func claim(_ ids: [CGWindowID]) {
         lock.lock(); windows.formUnion(ids); lock.unlock()
+    }
+
+    /// Windows expected in `pid` that haven't appeared yet.
+    private func pendingCount(_ pid: pid_t, open: [WindowInfo]) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let live = (pending[pid] ?? []).filter { $0.until > Date() }
+        pending[pid] = live
+        guard let first = live.first else { return 0 }
+        let appeared = open.filter { !first.before.contains($0.id) }.count
+        return max(0, live.count - appeared)
     }
 
     func claimApp(_ pid: pid_t) {
@@ -25,6 +44,47 @@ final class Ownership: @unchecked Sendable {
     func owns(_ id: CGWindowID, pid: pid_t) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return windows.contains(id) || apps.contains(pid)
+    }
+
+    /// The agent's windows of `pid` that are still open.
+    func open(pid: pid_t) -> [WindowInfo] {
+        // Accessibility lists real windows (not the hidden ones apps keep
+        // around), but can miss one that only just opened; the WindowServer
+        // has a window on screen the moment it's shown. Count both.
+        var all = Windows.list(pid: pid)
+        let listed = Set(all.map(\.id))
+        all += Windows.all().filter { $0.pid == pid && $0.layer == 0 && !listed.contains($0.id) }
+        lock.lock(); defer { lock.unlock() }
+        return apps.contains(pid) ? all : all.filter { windows.contains($0.id) }
+    }
+
+    /// How many windows an agent may keep open in one app. A window per page
+    /// or per step fills the user's screen; agents should reuse theirs.
+    static let maxWindows = Int(ProcessInfo.processInfo.environment["BACKSEAT_MAX_WINDOWS"] ?? "") ?? 3
+
+    /// Throws if opening another window in `pid` would bother the user: they're
+    /// in that app right now (its new window becomes theirs: it takes their
+    /// keyboard focus, and in full screen moves them to a Space of its own), or
+    /// the agent already has `maxWindows` open there.
+    static func checkBudget(pid: pid_t, counting: Bool = true) throws {
+        let app = NSRunningApplication(processIdentifier: pid)
+        if app?.isActive == true {
+            let name = app?.localizedName ?? "this app"
+            let mine = shared.open(pid: pid).map { String($0.id) }
+            throw ToolError("""
+            not opened: the user is in \(name) right now, and a new \(name) window would take their focus \
+            (in full screen, it moves them to a Space of its own). \(mine.isEmpty ? "" : "Use a window you already have (\(mine.joined(separator: ", "))); in a browser, launch_app with url and window_id loads a page in it. ")\
+            Or do this in another app the user isn't in, or wait until they've left \(name).
+            """)
+        }
+        let mine = shared.open(pid: pid)
+        guard counting, mine.count + shared.pendingCount(pid, open: mine) >= maxWindows else { return }
+        let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "this app"
+        throw ToolError("""
+        not opened: you already have \(mine.count) windows open in \(name) (\(mine.map { String($0.id) }.joined(separator: ", "))), \
+        and each new one appears on the user's screen. Reuse one of yours (launch_app with url and window_id loads a page \
+        in it), or close_window the ones you're done with first.
+        """)
     }
 
     /// The window the user is in right now, if it belongs to `pid`.
@@ -39,7 +99,7 @@ final class Ownership: @unchecked Sendable {
         if args.bool("user_window") == true { return }
         let app = NSRunningApplication(processIdentifier: pid)
         let name = app?.localizedName ?? "the app"
-        let own = "Work in a window of your own: open one (select_menu_item File > New Window, or launch_app with a url) and use its id. Pass user_window: true only if the user asked you to use their window."
+        let own = "Work in a window of your own: reuse one you opened, or open one (select_menu_item File > New Window, or launch_app with a url) and use its id. Pass user_window: true only if the user asked you to use their window."
         guard let id else {
             if !reading, app?.isActive == true {
                 throw ToolError("the user is working in \(name) right now, so its focused element is theirs; nothing was sent. \(own)")

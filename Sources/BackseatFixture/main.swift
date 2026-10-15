@@ -383,7 +383,13 @@ func installActivationProbe() {
     }
 }
 
-let app = NSApplication.shared
+/// A regular app, like the ones backseat drives, but one that never bounces in
+/// the Dock: tests open sheets in it while it's in the background, and AppKit
+/// would otherwise bounce its icon at the user until the sheet closed.
+final class FixtureApplication: NSApplication {
+    override func requestUserAttention(_ requestType: NSApplication.RequestUserAttentionType) -> Int { 0 }
+}
+let app = FixtureApplication.shared
 // Count every key event the app receives: a refused shortcut must send none.
 NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { e in
     State.bump("keyDowns")
@@ -405,6 +411,17 @@ if CommandLine.arguments.contains("--probe") {
 let controller = Controller()
 app.delegate = controller
 app.setActivationPolicy(.regular)
+// Its Dock icon while tests run: a test tube, so it's clearly backseat's test app.
+app.applicationIconImage = NSImage(size: NSSize(width: 512, height: 512), flipped: false) { rect in
+    NSColor(calibratedRed: 0.13, green: 0.55, blue: 0.33, alpha: 1).setFill()
+    NSBezierPath(roundedRect: rect.insetBy(dx: 50, dy: 50), xRadius: 90, yRadius: 90).fill()
+    let config = NSImage.SymbolConfiguration(pointSize: 230, weight: .semibold).applying(.init(paletteColors: [.white]))
+    if let symbol = NSImage(systemSymbolName: "testtube.2", accessibilityDescription: nil)?.withSymbolConfiguration(config) {
+        let s = symbol.size
+        symbol.draw(in: NSRect(x: rect.midX - s.width / 2, y: rect.midY - s.height / 2, width: s.width, height: s.height))
+    }
+    return true
+}
 app.run()
 
 extension NSObjectProtocol {

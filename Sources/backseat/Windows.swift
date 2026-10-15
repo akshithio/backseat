@@ -31,6 +31,7 @@ enum Windows {
     /// front: every tool works on all of these except screenshot on minimized.
     static func state(of w: WindowInfo) -> [String] {
         var out: [String] = []
+        if Ownership.shared.owns(w.id, pid: w.pid) { out.append("yours: you opened it") }
         let app = NSRunningApplication(processIdentifier: w.pid)
         let axw = AX.window(id: w.id, pid: w.pid)
         if let axw, (AX.attr(axw, kAXMinimizedAttribute) as? Bool) == true { out.append("minimized") }
