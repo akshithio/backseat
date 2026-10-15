@@ -97,8 +97,14 @@ enum AX {
     static func window(id: CGWindowID, pid: pid_t, search: Bool = false) -> AXUIElement? {
         if let w = windows(pid).first(where: { windowID($0) == id }) { return w }
         guard search, Windows.all(includeOffscreen: true).contains(where: { $0.id == id && $0.pid == pid }) else { return nil }
+        // A window that turned out not to be one of the app's own (a backdrop,
+        // a helper surface) isn't searched for again for a while.
+        seenLock.lock()
+        let missedRecently = notWindows[id].map { Date().timeIntervalSince($0) < 30 } ?? false
+        seenLock.unlock()
+        if missedRecently { return nil }
         let w = windowsOnOtherSpaces(pid, budget: 3, upTo: 200_000, stopAt: id).first { windowID($0) == id }
-        if let w { remember([w], pid: pid) }
+        if let w { remember([w], pid: pid) } else { seenLock.lock(); notWindows[id] = Date(); seenLock.unlock() }
         return w
     }
 
@@ -107,6 +113,7 @@ enum AX {
     /// after it opened) stays reachable through the element already in hand.
     nonisolated(unsafe) private static var seenWindows: [pid_t: [CGWindowID: AXUIElement]] = [:]
     private static let seenLock = NSLock()
+    nonisolated(unsafe) private static var notWindows: [CGWindowID: Date] = [:]
 
     private static func remember(_ windows: [AXUIElement], pid: pid_t) {
         seenLock.lock(); defer { seenLock.unlock() }

@@ -108,7 +108,14 @@ enum Windows {
     /// show up inside their parent window's UI tree instead.
     static func list(pid: pid_t) -> [WindowInfo] {
         let cg = Dictionary(all(includeOffscreen: true).filter { $0.pid == pid }.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        return AX.windows(pid).compactMap { axw in
+        var axWindows = AX.windows(pid)
+        // A real window the quick lookup missed (one that moved to another
+        // Space after it stopped being focused): look for it specifically.
+        let found = Set(axWindows.compactMap(AX.windowID))
+        for c in cg.values where !found.contains(c.id) && c.layer == 0 && c.frame.width >= 100 && c.frame.height >= 100 {
+            if let w = AX.window(id: c.id, pid: pid, search: true) { axWindows.append(w) }
+        }
+        return axWindows.compactMap { axw in
             guard let id = AX.windowID(axw), let c = cg[id] else { return nil }
             return WindowInfo(id: id, pid: pid, app: c.app, title: AX.string(axw, kAXTitleAttribute) ?? c.title,
                               frame: AX.frame(axw) ?? c.frame, onScreen: c.onScreen, layer: c.layer, alpha: c.alpha)
