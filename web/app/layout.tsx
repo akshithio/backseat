@@ -1,9 +1,10 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, JetBrains_Mono } from "next/font/google";
+import { FontPicker } from "@/components/FontPicker";
+import { candidateVariables, geist, jetbrains } from "./fonts";
 import "./globals.css";
 
-const jetbrains = JetBrains_Mono({ subsets: ["latin"], variable: "--font-jetbrains" });
-const geist = Geist({ subsets: ["latin"], variable: "--font-geist" });
+// The font picker is for choosing fonts locally; it never ships.
+const dev = process.env.NODE_ENV === "development";
 
 const description =
   "Computer use for macOS that doesn't take over your screen. Your agent drives apps in the background while your pointer, keyboard focus and Space stay yours.";
@@ -18,7 +19,7 @@ export const metadata: Metadata = {
     url: "https://backseat.akshith.io",
     siteName: "backseat",
   },
-  twitter: { card: "summary" },
+  twitter: { card: "summary_large_image" },
 };
 
 export const viewport: Viewport = {
@@ -27,9 +28,10 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${jetbrains.variable} ${geist.variable}`}>
+    <html lang="en" className={`${jetbrains.variable} ${geist.variable}${dev ? ` ${candidateVariables}` : ""}`}>
       <body className="bg-paper font-mono text-ink antialiased">
         {children}
+        {dev ? <FontPicker /> : null}
       </body>
     </html>
   );

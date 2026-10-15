@@ -324,3 +324,11 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .hand-wave { animation: none; }
 }
+
+/* ------------------------------------------------- font picker (dev only) */
+html[data-font="space"] { --font-display: var(--font-space-grotesk), sans-serif; --font-mono: var(--font-space-mono), monospace; }
+html[data-font="plex"] { --font-display: var(--font-plex-sans), sans-serif; --font-mono: var(--font-plex-mono), monospace; }
+html[data-font="inter"] { --font-display: var(--font-inter-tight), sans-serif; --font-mono: var(--font-geist-mono), monospace; }
+html[data-font="instrument"] { --font-display: var(--font-instrument), sans-serif; --font-mono: var(--font-dm-mono), monospace; }
+html[data-font="pixel"] { --font-display: var(--font-silkscreen), monospace; --font-mono: var(--font-plex-mono), monospace; }
+html[data-font="sans"] { --font-display: var(--font-inter-tight), sans-serif; --font-mono: var(--font-inter), sans-serif; }
