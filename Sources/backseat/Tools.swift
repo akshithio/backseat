@@ -192,7 +192,9 @@ enum Tools {
             Capture one window, even when it is covered, on another Space, or off screen. At scale 1, image pixels equal \
             window-relative points. With as_seen, capture instead exactly the part of the user's screen where that window \
             is, as the user sees it (whatever covers it, and backseat's green outline), never anything outside it. \
-            macOS briefly shows its screen-recording indicator for any capture; prefer get_ui_tree or read_text when text is enough.
+            macOS briefly shows its screen-recording indicator for any capture; prefer get_ui_tree or read_text when text is enough. \
+            A window that isn't on the user's screen may not have been redrawn lately (browsers pause hidden windows), so its \
+            screenshot can be out of date; the accessibility tree is always current.
             """,
             inputSchema: schema([
                 "window_id": windowID,
@@ -471,23 +473,22 @@ enum Tools {
         let role = args.string("role").map(normalizeRole)
         guard text != nil || role != nil else { throw ToolError("pass text and/or role") }
         let limit = args.int("limit") ?? 30
-        let matches = Tree.walk(root, maxDepth: 60, maxNodes: 5000, collapseLists: false).nodes.filter { n in
-            if let role, n.role.lowercased() != role.lowercased() { return false }
-            if let text, !n.label.lowercased().contains(text), !(n.value?.lowercased().contains(text) ?? false) { return false }
-            return true
+        let (found, visited, complete) = Tree.search(root, text: text, role: role, limit: limit)
+        if found.isEmpty {
+            return .text(complete ? "no matches in \(what)"
+                : "no matches in the first \(visited) elements of \(what) (stopped at the time limit; pass element_id to search one part)")
         }
-        if matches.isEmpty { return .text("no matches in \(what)") }
-        let lines = matches.prefix(limit).map { n in
-            var line = Node(id: n.id, depth: 0, role: n.role, label: n.label, value: n.value, frame: n.frame, actions: n.actions,
-                            enabled: n.enabled, focused: n.focused, settable: n.settable).line(relativeTo: origin)
+        let lines = found.map { e -> String in
+            var line = Tree.line(e, relativeTo: origin)
             // A bare label (sidebar row text, a button's caption): name what to act on.
-            if !n.settable, let e = ElementStore.shared.lookup(n.id), AX.howToAct(e) == nil,
-               let (target, how) = AX.actionable(e) {
-                line += "  → \(how) via \(describe(target, ElementStore.shared.add(target))): click \(n.id) does that"
+            if !AX.isSettable(e, kAXValueAttribute), AX.howToAct(e) == nil, let (target, how) = AX.actionable(e) {
+                line += "  → \(how) via \(describe(target, ElementStore.shared.add(target))): click \(ElementStore.shared.add(e)) does that"
             }
             return line
         }
-        return .text("\(matches.count) match(es) in \(what)\n" + lines.joined(separator: "\n"))
+        let header = complete ? "\(found.count) match(es) in \(what)"
+            : "first \(found.count) match(es) in \(what) (stopped early; raise limit or pass element_id for more)"
+        return .text(header + "\n" + lines.joined(separator: "\n"))
     }
 
     private static func normalizeRole(_ r: String) -> String {
@@ -1070,8 +1071,13 @@ enum Tools {
         let shot = args.bool("as_seen") == true
             ? try Capture.asSeen(wid, scale: scale, format: args.string("format") ?? "png")
             : try await Capture.window(wid, scale: scale, format: args.string("format") ?? "png")
+        // Apps stop drawing windows nobody can see (browsers especially), so a
+        // capture of one shows whatever it last drew. Say so up front; the
+        // accessibility tree is always current.
+        let unseen = args.bool("as_seen") != true && (try? Windows.get(wid)).map { !Windows.visibleToUser($0) } ?? false
         return .image(shot.data, mime: shot.mime,
-                      caption: "window \(wid): \(shot.width)x\(shot.height) px at scale \(scale); window-relative point = pixel / \(scale)")
+                      caption: "window \(wid): \(shot.width)x\(shot.height) px at scale \(scale); window-relative point = pixel / \(scale)"
+                        + (unseen ? "\nThis window isn't on the user's screen, so the app may not have redrawn it lately and the image can be out of date. get_ui_tree and read_text always show its current state; check results there." : ""))
     }
 
     // MARK: Menus and waiting
@@ -1530,10 +1536,9 @@ enum Tools {
         let start = Date()
         let deadline = start.addingTimeInterval(Double(ms) / 1000)
         func elapsed() -> Int { Int(Date().timeIntervalSince(start) * 1000) }
-        func matching(_ root: AXUIElement, _ t: String) -> Node? {
-            Tree.walk(root, maxDepth: 60, maxNodes: 5000, collapseLists: false).nodes.first {
-                $0.label.lowercased().contains(t) || ($0.value?.lowercased().contains(t) ?? false)
-            }
+        func matching(_ root: AXUIElement, _ t: String) -> (match: AXUIElement?, complete: Bool) {
+            let r = Tree.search(root, text: t, role: nil, limit: 1, budget: 3)
+            return (r.matches.first, r.complete)
         }
         var lastDigest: Int?
         var stableSince = Date()
@@ -1542,13 +1547,14 @@ enum Tools {
             switch until {
             case "text":
                 guard let text else { throw ToolError("until text needs text") }
-                if let n = matching(root, text) {
-                    return .text("found after \(elapsed()) ms: " + Node(id: n.id, depth: 0, role: n.role, label: n.label, value: n.value, frame: n.frame,
-                                                 actions: n.actions, enabled: n.enabled, focused: n.focused, settable: n.settable).line(relativeTo: origin))
+                if let e = matching(root, text).match {
+                    return .text("found after \(elapsed()) ms: " + Tree.line(e, relativeTo: origin))
                 }
             case "gone":
                 guard let text else { throw ToolError("until gone needs text") }
-                if matching(root, text) == nil { return .text("\"\(text)\" is gone from \(what) after \(elapsed()) ms") }
+                // A search cut short by its time limit proves nothing.
+                let r = matching(root, text)
+                if r.match == nil && r.complete { return .text("\"\(text)\" is gone from \(what) after \(elapsed()) ms") }
             case "loaded":
                 // Web pages: not busy, marked loaded, and the page stopped
                 // changing for a moment (a click may not have started loading yet).

@@ -61,6 +61,18 @@ enum AX {
         return AXUIElementCopyAttributeValue(e, name as CFString, &value) == .success ? value : nil
     }
 
+    /// Several attributes in one round trip to the app. Each separate read is
+    /// its own call into the app, which adds up to seconds on a big web page.
+    /// Attributes the element doesn't have come back nil.
+    static func values(_ e: AXUIElement, _ names: [String]) -> [AnyObject?] {
+        var out: CFArray?
+        guard AXUIElementCopyMultipleAttributeValues(e, names as CFArray, AXCopyMultipleAttributeOptions(rawValue: 0), &out) == .success,
+              let all = out as? [AnyObject], all.count == names.count else { return names.map { _ in nil } }
+        return all.map { v in
+            CFGetTypeID(v) == AXValueGetTypeID() && AXValueGetType(v as! AXValue) == .axError ? nil : v
+        }
+    }
+
     static func string(_ e: AXUIElement, _ name: String) -> String? {
         (attr(e, name) as? String)?.withoutDirectionMarks
     }
@@ -421,6 +433,50 @@ enum Tree {
 
         visit(root, depth: 0, renderDepth: 0)
         return (nodes, truncated)
+    }
+
+    /// Elements whose role matches and whose label or value contains `text`,
+    /// nearest the top first. Reads each element's attributes in one round
+    /// trip, and stops at `limit` matches or when `budget` runs out, so a
+    /// search on a huge web page answers in a few seconds at most.
+    static func search(_ root: AXUIElement, text: String?, role: String?, limit: Int,
+                       budget: TimeInterval = 4) -> (matches: [AXUIElement], visited: Int, complete: Bool) {
+        let keys = [kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, "AXLabel",
+                    kAXPlaceholderValueAttribute, kAXValueAttribute, kAXChildrenAttribute]
+        let deadline = Date().addingTimeInterval(budget)
+        var queue = [root]
+        var head = 0
+        var matches: [AXUIElement] = []
+        while head < queue.count {
+            if matches.count >= limit || Date() > deadline || head >= 20_000 { return (matches, head, false) }
+            let e = queue[head]
+            head += 1
+            let v = AX.values(e, keys)
+            let r = (v[0] as? String) ?? ""
+            if r == "AXMenuBar" || r == "AXMenu" { continue }
+            if role.map({ r.lowercased() == $0.lowercased() }) ?? true {
+                if let text {
+                    var label = [v[1], v[2], v[3], v[4]].compactMap { ($0 as? String)?.withoutDirectionMarks }.first { !$0.isEmpty } ?? ""
+                    // Web headings and links keep their text in a child.
+                    if label.isEmpty, r == "AXHeading" || r == "AXLink" { label = Tree.label(e) }
+                    let value = (v[5] as? String)?.withoutDirectionMarks ?? (v[5] as? NSNumber)?.stringValue ?? ""
+                    if label.lowercased().contains(text) || value.lowercased().contains(text) { matches.append(e) }
+                } else {
+                    matches.append(e)
+                }
+            }
+            if let kids = v[6] as? [AXUIElement] { queue += kids }
+        }
+        return (matches, head, true)
+    }
+
+    /// One element as a tree line, for search results.
+    static func line(_ e: AXUIElement, relativeTo origin: CGPoint) -> String {
+        let role = AX.string(e, kAXRoleAttribute) ?? "?"
+        return Node(id: ElementStore.shared.add(e), depth: 0, role: role, label: label(e), value: AX.valueString(e),
+                    frame: AX.frame(e), actions: AX.actions(e), enabled: (AX.attr(e, kAXEnabledAttribute) as? Bool) ?? true,
+                    focused: false, settable: AX.isSettable(e, kAXValueAttribute) && role != "AXScrollBar" && role != "AXSplitter")
+            .line(relativeTo: origin)
     }
 
     static func label(_ e: AXUIElement) -> String {
