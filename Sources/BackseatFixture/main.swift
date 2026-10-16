@@ -219,18 +219,24 @@ final class Controller: NSObject, NSTextFieldDelegate, NSApplicationDelegate, NS
         }
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            if otherSpace && self.window.isOnActiveSpace {
-                // The user is on the Space the window opened on; take it off
-                // that Space so it's somewhere they aren't looking.
-                let cid = CGSMainConnectionID()
-                CGSRemoveWindowsFromSpaces(cid, [NSNumber(value: self.window.windowNumber)] as CFArray,
-                                           [NSNumber(value: CGSGetActiveSpace(cid))] as CFArray)
-                State.set("spaceMode", "detached from the user's Space")
-            } else if otherSpace {
-                State.set("spaceMode", "opened on a Space the user isn't on")
+        // The window can land on the user's Space a moment after it opens, so
+        // keep checking for a few seconds.
+        for delay in [0.3, 0.7, 1.2, 2.0, 3.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                if otherSpace && self.window.isOnActiveSpace {
+                    // Onto a real other Space: a window on no Space at all is put
+                    // back on the user's by macOS the next time it's ordered in.
+                    let cid = CGSMainConnectionID()
+                    let (space, how) = spaceElsewhere(cid)
+                    let win = [NSNumber(value: self.window.windowNumber)] as CFArray
+                    CGSAddWindowsToSpaces(cid, win, [NSNumber(value: space)] as CFArray)
+                    CGSRemoveWindowsFromSpaces(cid, win, [NSNumber(value: CGSGetActiveSpace(cid))] as CFArray)
+                    State.set("spaceMode", how)
+                } else if otherSpace && State.values["spaceMode"] == nil {
+                    State.set("spaceMode", "opened on a Space the user isn't on")
+                }
+                State.set("onActiveSpace", self.window.isOnActiveSpace)
             }
-            State.set("onActiveSpace", self.window.isOnActiveSpace)
         }
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
@@ -279,9 +285,15 @@ final class Controller: NSObject, NSTextFieldDelegate, NSApplicationDelegate, NS
         State.bump("keyWindows")
     }
     @objc func newWindow() {
-        let w = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 260, height: 160), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let w = FixtureWindow(contentRect: NSRect(x: 80, y: 80, width: 260, height: 160), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "Fixture Extra"
         w.isReleasedWhenClosed = false
+        // Wherever the main window is: off every display in the background
+        // runs, so these never show up on the user's screen or in Mission Control.
+        w.unconstrained = window.unconstrained
+        w.alphaValue = window.alphaValue
+        w.collectionBehavior = window.collectionBehavior
+        w.setFrameOrigin(NSPoint(x: window.frame.minX, y: window.frame.minY))
         w.orderFrontRegardless()
         extraWindows.append(w)
         State.bump("extraWindows")
@@ -348,6 +360,25 @@ final class Controller: NSObject, NSTextFieldDelegate, NSApplicationDelegate, NS
 @_silgen_name("CGSMainConnectionID") func CGSMainConnectionID() -> Int32
 @_silgen_name("CGSGetActiveSpace") func CGSGetActiveSpace(_ cid: Int32) -> UInt64
 @_silgen_name("CGSRemoveWindowsFromSpaces") func CGSRemoveWindowsFromSpaces(_ cid: Int32, _ windows: CFArray, _ spaces: CFArray)
+@_silgen_name("CGSAddWindowsToSpaces") func CGSAddWindowsToSpaces(_ cid: Int32, _ windows: CFArray, _ spaces: CFArray)
+@_silgen_name("CGSCopyManagedDisplaySpaces") func CGSCopyManagedDisplaySpaces(_ cid: Int32) -> Unmanaged<CFArray>?
+@_silgen_name("CGSSpaceCreate") func CGSSpaceCreate(_ cid: Int32, _ flag: Int32, _ options: CFDictionary?) -> UInt64
+
+/// A Space the user isn't on: another desktop if there is one, else a new,
+/// hidden Space that goes away with this process.
+func spaceElsewhere(_ cid: Int32) -> (UInt64, String) {
+    let active = CGSGetActiveSpace(cid)
+    let displays = CGSCopyManagedDisplaySpaces(cid)?.takeRetainedValue() as? [[String: Any]] ?? []
+    for d in displays {
+        for space in d["Spaces"] as? [[String: Any]] ?? [] {
+            if let id = (space["ManagedSpaceID"] ?? space["id64"]) as? UInt64 ?? (space["ManagedSpaceID"] as? Int).map(UInt64.init),
+               id != active, (space["type"] as? Int) == 0 {
+                return (id, "moved to another desktop")
+            }
+        }
+    }
+    return (CGSSpaceCreate(cid, 1, nil), "moved to a hidden Space")
+}
 
 /// Lets the invisible test window live beyond every display; AppKit would
 /// otherwise pull a titled window back on screen.
@@ -410,8 +441,11 @@ if CommandLine.arguments.contains("--probe") {
 }
 let controller = Controller()
 app.delegate = controller
-app.setActivationPolicy(.regular)
-// Its Dock icon while tests run: a test tube, so it's clearly backseat's test app.
+// Accessory: no Dock tile, so test runs never show up in the user's Dock. It
+// still has a menu bar for backseat to drive and can still activate itself,
+// which is what the tests watch for.
+app.setActivationPolicy(.accessory)
+// Its icon (in the app switcher, if it ever activates): a test tube.
 app.applicationIconImage = NSImage(size: NSSize(width: 512, height: 512), flipped: false) { rect in
     NSColor(calibratedRed: 0.13, green: 0.55, blue: 0.33, alpha: 1).setFill()
     NSBezierPath(roundedRect: rect.insetBy(dx: 50, dy: 50), xRadius: 90, yRadius: 90).fill()

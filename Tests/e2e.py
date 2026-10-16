@@ -63,6 +63,16 @@ def jxa(expr):
     return out.stdout.strip()
 
 
+def user_acted_since(t):
+    """True if the user clicked, or pressed a key with ⌘ down, on real hardware
+    since time `t`: the same test FocusGuard uses to leave a switch alone."""
+    out = jxa("ObjC.import('CoreGraphics'); const s = t => $.CGEventSourceSecondsSinceLastEventType(1, t);"
+              "JSON.stringify([Math.min(s(1), s(3), s(25)), s(10), ($.CGEventSourceFlagsState(1) & 0x100000) != 0])")
+    mouse, key, cmd = json.loads(out)
+    elapsed = time.time() - t
+    return mouse < elapsed or (key < elapsed and cmd)
+
+
 def make_bundle(tmp):
     app = os.path.join(tmp, "BackseatFixture.app")
     os.makedirs(os.path.join(app, "Contents", "MacOS"))
@@ -91,7 +101,7 @@ class Run:
         self.mcp, self.mode = mcp, mode
         self.tmp = tempfile.mkdtemp(prefix="backseat-e2e-")
         self.state_path = os.path.join(self.tmp, "state.json")
-        self.passed, self.failed = [], []
+        self.passed, self.failed, self.interrupted, self.skipped = [], [], [], []
         self.pid = self.wid = None
 
     def state(self):
@@ -116,20 +126,36 @@ class Run:
             time.sleep(0.05)
         return False
 
+    def fixture_in_front(self):
+        return jxa("$.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier") == str(self.pid)
+
     def check(self, name, fn, activates=False):
         """`activates`: the action makes the app activate itself on purpose (like
         Finder's New Finder Window); backseat must undo it, not prevent it."""
         name = f"[{self.mode}] {name}"
+        # Once the user is in the fixture, backseat rightly treats its window as
+        # theirs and refuses to touch it, so later checks would fail for nothing.
+        if self.interrupted or (not activates and self.fixture_in_front()):
+            self.skipped.append(name)
+            return
+        started, active_before = time.time(), None
         try:
             active_before = self.state()["becameActive"]
             fn()
             if not activates:
                 assert self.state()["becameActive"] == active_before, "fixture became the active app"
-            front = jxa("$.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier")
-            assert front != str(self.pid), "fixture is the user's frontmost app"
+            assert not self.fixture_in_front(), "fixture is the user's frontmost app"
             self.passed.append(name)
             print(f"  ✓ {name}")
         except Exception as e:
+            if not activates and user_acted_since(started) and (
+                    self.fixture_in_front() or self.state()["becameActive"] != active_before):
+                # The user switched to the fixture themselves, which backseat
+                # rightly leaves alone: the check proved nothing either way.
+                self.interrupted.append(name)
+                print(f"  ? {name}: interrupted: you clicked or ⌘-switched into the fixture "
+                      "(its Dock icon, or a window in Mission Control); skipping the rest of this pass")
+                return
             self.failed.append((name, e))
             print(f"  ✗ {name}: {e}")
 
@@ -137,7 +163,7 @@ class Run:
         app = make_bundle(self.tmp)
         out = self.mcp.ok("launch_app", path=app, arguments=[self.state_path, *flags])
         self.pid = int(re.search(r"pid=(\d+)", out).group(1))
-        assert self.eventually(lambda s: s.get("ready") and "onActiveSpace" in s), "fixture never became ready"
+        assert self.eventually(lambda s: s.get("ready") and "onActiveSpace" in s, timeout=10), "fixture never became ready"
         text = self.mcp.ok("list_windows", pid=self.pid)
         self.wid = int(re.search(r'window (\d+) .*"Backseat Fixture"', text).group(1))
 
@@ -699,7 +725,7 @@ def main():
         r = Run(mcp, "other Space")
         runs.append(r)
         r.launch("--other-space")
-        assert r.eventually(lambda s: s["onActiveSpace"] is False), "couldn't get the fixture off the user's Space"
+        assert r.eventually(lambda s: s["onActiveSpace"] is False, timeout=5), "couldn't get the fixture off the user's Space"
         print(f"  ({r.state()['spaceMode']})")
         other_space_suite(r)
         r.stop()
@@ -726,10 +752,15 @@ def main():
 
     passed = sum(len(r.passed) for r in runs)
     failed = [f for r in runs for f in r.failed]
-    print(f"\n{passed} passed, {len(failed)} failed")
+    interrupted = [n for r in runs for n in r.interrupted]
+    skipped = sum(len(r.skipped) for r in runs)
+    print(f"\n{passed} passed, {len(failed)} failed"
+          + (f", {len(interrupted)} interrupted by you, {skipped} not run after it" if interrupted or skipped else ""))
     for name, e in failed:
         print(f"  FAILED {name}: {e}")
-    sys.exit(1 if failed else 0)
+    for name in interrupted:
+        print(f"  INTERRUPTED {name}: run again without switching into BackseatFixture")
+    sys.exit(1 if failed or interrupted or skipped else 0)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,11 @@ final class FocusGuard: @unchecked Sendable {
     private var touched: [pid_t: Date] = [:]
     /// The app the user last chose to be in.
     private var userApp: NSRunningApplication?
+    /// The window the user was in, read while their app was still active: once
+    /// another app has taken over, their app can report some other window as
+    /// focused (one on the desktop rather than their full-screen one), and
+    /// handing focus back to that would leave them on the wrong Space.
+    private var userWindow: (pid: pid_t, id: CGWindowID)?
     /// Focus hand-backs not yet reported, by the pid that took focus, so each
     /// tool call reports only what its own app did (agents run in parallel).
     private var notes: [pid_t: [String]] = [:]
@@ -37,14 +42,36 @@ final class FocusGuard: @unchecked Sendable {
 
     /// Call before acting on an app; activations of it within `seconds` are undone.
     func touch(_ pid: pid_t, seconds: TimeInterval = 4) {
+        rememberUserWindow(except: pid)
         lock.lock(); defer { lock.unlock() }
         touched[pid] = max(touched[pid] ?? .distantPast, Date().addingTimeInterval(seconds))
     }
 
     /// Call before launching an app, whose pid isn't known yet.
     func expectLaunch(of url: URL, seconds: TimeInterval = 10) {
+        rememberUserWindow(except: nil)
         lock.lock(); defer { lock.unlock() }
         launching[url.standardizedFileURL] = Date().addingTimeInterval(seconds)
+    }
+
+    /// Notes the window the user is in right now, before backseat does
+    /// anything that could pull another app forward.
+    private func rememberUserWindow(except pid: pid_t?) {
+        guard let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != pid,
+              front.processIdentifier != getpid(),
+              let id = AX.attr(AX.app(front.processIdentifier), kAXFocusedWindowAttribute)
+                .map({ $0 as! AXUIElement }).flatMap(AX.windowID) else { return }
+        lock.lock(); defer { lock.unlock() }
+        // Only while the user's app is the one in front, not one we're acting on.
+        if (touched[front.processIdentifier] ?? .distantPast) > Date() { return }
+        userWindow = (front.processIdentifier, id)
+    }
+
+    /// The window to put the user back in, for `app`.
+    private func handBackWindow(_ app: NSRunningApplication) -> CGWindowID? {
+        lock.lock(); defer { lock.unlock() }
+        guard let w = userWindow, w.pid == app.processIdentifier else { return nil }
+        return w.id
     }
 
     /// True if the user just clicked, or just pressed a ⌘ shortcut (⌘-Tab, Spotlight),
@@ -64,14 +91,17 @@ final class FocusGuard: @unchecked Sendable {
         if app.processIdentifier == lentTo { lock.unlock(); return }
         let now = Date()
         let launched = app.bundleURL.map { (launching[$0.standardizedFileURL] ?? .distantPast) > now } ?? false
-        let blamed = ((touched[app.processIdentifier] ?? .distantPast) > now || launched) && !userJustActed
+        // An app backseat is launching right now brought itself forward: that's
+        // never the user, even if they happened to click somewhere this instant.
+        let blamed = launched || ((touched[app.processIdentifier] ?? .distantPast) > now && !userJustActed)
         let user = userApp
         if !blamed { userApp = app }
         lock.unlock()
 
         guard blamed, let user, user.processIdentifier != app.processIdentifier, !user.isTerminated else { return }
-        bringToFront(user)
-        holdFocus(for: user, against: app)
+        let window = handBackWindow(user)
+        bringToFront(user, window: window)
+        holdFocus(for: user, window: window, against: app)
         lock.lock()
         notes[app.processIdentifier, default: []].append("\(app.localizedName ?? "the app") brought itself to the front; focus went straight back to \(user.localizedName ?? "your app")")
         lock.unlock()
@@ -81,14 +111,17 @@ final class FocusGuard: @unchecked Sendable {
     /// Folder activates, then the Space switch settles, then the panel opens).
     /// No new activation notification arrives for that, so the user would stay
     /// stuck in the app: check for a moment and hand focus back again.
-    private func holdFocus(for user: NSRunningApplication, against app: NSRunningApplication) {
+    private func holdFocus(for user: NSRunningApplication, window: CGWindowID?, against app: NSRunningApplication) {
         let start = Date()
         for delay in [0.1, 0.25, 0.5, 0.8, 1.2] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self, !Self.userActed(since: start), !user.isTerminated,
-                      NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
-                else { return }
-                self.bringToFront(user)
+                guard let self, !Self.userActed(since: start), !user.isTerminated else { return }
+                let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+                // The app took focus again, or the user's app is back in front but
+                // they're on the wrong Space (their window isn't on the active one).
+                let stranded = front == user.processIdentifier && window.map { !Windows.isOnActiveSpace($0) } == true
+                guard front == app.processIdentifier || stranded else { return }
+                self.bringToFront(user, window: window)
             }
         }
     }
@@ -159,14 +192,33 @@ final class FocusGuard: @unchecked Sendable {
     /// its main window. A command that opens a window (New Window) makes the new
     /// one main, so the user would land in the agent's window instead of theirs.
     /// While the app stays in the background, make `window` main again.
+    private var aimed: [pid_t: Date] = [:]
+
+    /// backseat is about to send keys to `pid`'s focused window.
+    func aimingKeys(at pid: pid_t) {
+        lock.lock(); aimed[pid] = Date(); lock.unlock()
+    }
+
+    /// True once keys backseat sent to `pid` have had time to land.
+    private func keysSettled(_ pid: pid_t) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return Date().timeIntervalSince(aimed[pid] ?? .distantPast) >= 0.5
+    }
+
     func holdMain(pid: pid_t, window: AXUIElement) {
         guard let id = AX.windowID(window) else { return }
-        for delay in [0.05, 0.15, 0.3, 0.6, 1.0, 1.6] {
+        for delay in [0.05, 0.15, 0.3, 0.6, 1.0, 1.6, 2.5] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 guard let app = NSRunningApplication(processIdentifier: pid), !app.isActive, !app.isTerminated,
-                      let now = AX.attr(AX.app(pid), kAXMainWindowAttribute).map({ $0 as! AXUIElement }),
-                      AX.windowID(now) != id, AX.window(id: id, pid: pid) != nil else { return }
-                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+                      AX.window(id: id, pid: pid) != nil else { return }
+                let main = AX.attr(AX.app(pid), kAXMainWindowAttribute).map({ $0 as! AXUIElement }).flatMap(AX.windowID)
+                let focused = AX.attr(AX.app(pid), kAXFocusedWindowAttribute).map({ $0 as! AXUIElement }).flatMap(AX.windowID)
+                // Both: the focused window is the one the user lands in when they
+                // switch to the app, and backseat focuses its own to send keys.
+                if main != id { AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue) }
+                // Not before keys backseat just sent have landed: they go to the
+                // focused window when the app gets to them, which would be this one.
+                if focused != id, delay >= 0.6, self.keysSettled(pid) { AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue) }
             }
         }
     }
@@ -174,7 +226,12 @@ final class FocusGuard: @unchecked Sendable {
     /// The app's main window, while the user isn't in the app.
     static func mainWindow(ofBackground pid: pid_t) -> AXUIElement? {
         guard NSRunningApplication(processIdentifier: pid)?.isActive == false else { return nil }
-        return AX.attr(AX.app(pid), kAXMainWindowAttribute).map { $0 as! AXUIElement }
+        // The focused window is where the user lands on switching to the app.
+        // Never one of the agent's own: that would hand them the agent's window.
+        let app = AX.app(pid)
+        return [kAXFocusedWindowAttribute, kAXMainWindowAttribute]
+            .compactMap { AX.attr(app, $0).map { $0 as! AXUIElement } }
+            .first { w in AX.windowID(w).map { !Ownership.shared.ownsWindow($0) } ?? false }
     }
 
     /// Runs an action against `target` with the guard armed for it.

@@ -348,8 +348,11 @@ enum Tools {
 
     static func listApps() -> Output {
         let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        // Dock apps, plus menu-bar apps with a window open (a settings or
+        // main window), which can be driven the same way.
+        let windowed = Set(Windows.all().filter { $0.layer == 0 }.map(\.pid))
         let apps = NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular }
+            .filter { $0.activationPolicy == .regular || ($0.activationPolicy == .accessory && windowed.contains($0.processIdentifier)) }
             .sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
             .map { a in
                 "pid=\(a.processIdentifier)  \(a.localizedName ?? "?")  \(a.bundleIdentifier ?? "-")"
@@ -460,19 +463,26 @@ enum Tools {
         guard let app = NSRunningApplication(processIdentifier: info.pid), let bundle = app.bundleIdentifier else {
             throw ToolError("window \(wid)'s app isn't running")
         }
-        try checkAutomation(app)
-        guard let axWindow = AX.window(id: wid, pid: info.pid, search: true), let title = AX.string(axWindow, kAXTitleAttribute) else {
-            throw ToolError("window \(wid) has no title to find it by")
+        guard let axWindow = AX.window(id: wid, pid: info.pid, search: true) else { throw ToolError("window \(wid) isn't one of \(info.app)'s windows") }
+        // A browser that can't be scripted: type the address into the window's
+        // own address field and press Return, inside that window only.
+        func viaAddressField(_ why: String) async throws -> Output {
+            guard let field = addressField(axWindow) else {
+                throw ToolError("\(why); and window \(wid) has no address field to type into, so nothing was loaded")
+            }
+            let (_, note) = try await FocusGuard.run(target: info.pid) { () -> Void in
+                try aim(at: axWindow, pid: info.pid, what: "loading a page", args)
+                AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                AXUIElementSetAttributeValue(field, kAXValueAttribute as CFString, target as CFString)
+                Input.key(code: 36, flags: [], pid: info.pid)
+            }
+            return .text("loading \(target) in window \(wid) (typed into its address field); wait until loaded before reading it\(note)")
         }
+        do { try checkAutomation(app) } catch { return try await viaAddressField("\(info.app) can't be scripted without asking the user") }
+        guard let title = AX.string(axWindow, kAXTitleAttribute) else { return try await viaAddressField("window \(wid) has no title to find it by") }
         // A new window with no page yet has nothing to navigate from inside,
         // and setting its URL by script brings some browsers (Arc) to the front.
-        guard !webAreas(axWindow).isEmpty else {
-            throw ToolError("""
-            window \(wid) has no page open yet, so nothing was loaded. Type the first address into its own field \
-            (find_elements role AXTextField, set_value, press_key return); after that, launch_app with url and window_id \
-            moves it from page to page.
-            """)
-        }
+        if webAreas(axWindow).isEmpty { return try await viaAddressField("window \(wid) has no page yet") }
         FocusGuard.shared.touch(info.pid, seconds: 5)
         let userWindow = Ownership.userWindow(pid: info.pid)
         // Navigating from inside the page first: setting a tab's URL makes some
@@ -487,10 +497,10 @@ enum Tools {
         let lastError = errors.first { !$0.contains("-2740") && !$0.contains("-2741") } ?? errors.first ?? ""
         if let userWindow { FocusGuard.shared.holdWindow(pid: info.pid, window: userWindow) }
         if result.hasPrefix("matches") {
-            throw ToolError("couldn't tell window \(wid) apart from \(info.app)'s other windows by title (\(result)); nothing was loaded. Close it and open a new one with launch_app url.")
+            return try await viaAddressField("scripting couldn't single out window \(wid) by its title")
         }
         guard result == "ok" else {
-            throw ToolError("\(info.app) can't load a URL into a window by script (\(lastError.isEmpty ? "no tab URL property" : lastError)). Close window \(wid) and open the page with launch_app url instead.")
+            return try await viaAddressField("\(info.app) can't load a URL into a window by script (\(lastError.isEmpty ? "no tab URL property" : lastError))")
         }
         return .text("loading \(target) in window \(wid); wait until loaded before reading it" + FocusGuard.shared.drainNotes(for: info.pid))
     }
@@ -518,19 +528,40 @@ enum Tools {
                 return "ok"
             end tell
             """
-            let (out, err, status) = try await osascript(script)
+            // A browser that doesn't answer (a page busy, a dialog up) shouldn't
+            // hold up the call: give up on this route and try the next.
+            guard let (out, err, status) = try? await osascript(script, timeout: 6) else {
+                errors.append("timed out"); debugLog("browser script timed out: \(statement.prefix(80))"); continue
+            }
             if status == 0 { return (out, errors) }
+            debugLog("browser script failed: \(err) — \(statement.prefix(80))")
             errors.append(err)
         }
         return ("", errors)
     }
 
-    /// Clicks the web page element at `point` (window-relative) from inside the
-    /// page. Arc and other Chromium browsers neither take pointer events in a
-    /// background window nor offer a press action for most page elements, but
-    /// scriptable browsers run JavaScript in a tab without coming forward.
-    /// Nil if the browser can't be scripted that way.
-    static func webClick(_ element: AXUIElement, window: WindowInfo, point: CGPoint) async throws -> String? {
+    /// Runs `body` on the web page element at `point` (window-relative) from
+    /// inside the page, with `el` bound to that element and `x`, `y` to the
+    /// point in page coordinates. Arc and other Chromium browsers neither take
+    /// pointer events in a background window nor offer accessibility actions
+    /// for most page elements, but scriptable browsers run JavaScript in a tab
+    /// without coming forward. Nil if the browser can't be scripted that way.
+    static func inPage(_ element: AXUIElement, window: WindowInfo, point: CGPoint, _ body: String) async throws -> String? {
+        // Never act on whatever happens to be at the point: the element there
+        // must carry the label backseat expects, or it's found by that label.
+        let label = Tree.label(element).trimmingCharacters(in: .whitespacesAndNewlines)
+        let want = String(data: try JSONEncoder().encode(String(label.prefix(80))), encoding: .utf8) ?? "\"\""
+        let locate = """
+        var want=\(want).toLowerCase();\
+        function txt(e){var t=(e.getAttribute&&(e.getAttribute('aria-label')||e.getAttribute('title')||e.getAttribute('placeholder')))||'';\
+        if(e.labels&&e.labels.length)t+=' '+e.labels[0].innerText;return (t+' '+(e.innerText||e.value||'')).replace(/\\s+/g,' ').trim().toLowerCase();}\
+        function its(e){var t=txt(e);return t.indexOf(want)>=0&&t.length<=want.length*2+40;}\
+        function near(e){if(!want)return true;for(var i=0;e&&i<4;i++,e=e.parentElement){if(its(e))return true;}return false;}\
+        if(!el||!near(el)){el=null;var best=1e9;[].forEach.call(document.querySelectorAll('a,button,input,select,textarea,label,summary,[role],[onclick],[tabindex],[contenteditable]'),function(e){\
+        if(!its(e))return;var r=e.getBoundingClientRect();if(!r.width&&!r.height)return;\
+        var d=Math.abs(r.left+r.width/2-x)+Math.abs(r.top+r.height/2-y);if(d<best){best=d;el=e;}});\
+        if(!el)return 'nothing';el.scrollIntoView({block:'center'});var r=el.getBoundingClientRect();x=r.left+r.width/2;y=r.top+r.height/2;}
+        """
         var web: AXUIElement? = element
         while let w = web, AX.string(w, kAXRoleAttribute) != "AXWebArea" {
             web = AX.attr(w, kAXParentAttribute).map { $0 as! AXUIElement }
@@ -542,19 +573,136 @@ enum Tools {
               let title = AX.string(axWindow, kAXTitleAttribute) else { return nil }
         // Page coordinates: the point on screen, less where the page starts.
         let x = Int((window.frame.minX + point.x - area.minX).rounded()), y = Int((window.frame.minY + point.y - area.minY).rounded())
-        let js = appleScriptString("""
-        (function(){var x=\(x),y=\(y),el=document.elementFromPoint(x,y);if(!el)return 'nothing';\
+        let js = appleScriptString("(function(){var x=\(x),y=\(y),el=document.elementFromPoint(x,y);\(locate)\(body)})()")
+        FocusGuard.shared.touch(window.pid, seconds: 5)
+        let (result, _) = try await inBrowserWindow(bundle: bundle, title: title, [
+            "tell active tab to return execute javascript \(js)", "return do JavaScript \(js) in current tab",
+        ])
+        let out = result.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        return out.isEmpty || out.hasPrefix("matches") || out == "nothing" || out == "missing value" ? nil : out
+    }
+
+    /// The center of `e`, window-relative, for `inPage`.
+    static func center(of e: AXUIElement, in window: WindowInfo) -> CGPoint? {
+        guard let f = AX.frame(e) else { return nil }
+        return CGPoint(x: f.midX - window.frame.minX, y: f.midY - window.frame.minY)
+    }
+
+    /// Clicks the page element at `point` from inside the page; the element's tag.
+    static func webClick(_ element: AXUIElement, window: WindowInfo, point: CGPoint) async throws -> String? {
+        try await inPage(element, window: window, point: point, """
         var o={bubbles:true,cancelable:true,composed:true,view:window,clientX:x,clientY:y,button:0,buttons:1,pointerId:1,isPrimary:true};\
         el.dispatchEvent(new PointerEvent('pointerdown',o));el.dispatchEvent(new MouseEvent('mousedown',o));\
         if(el.focus)el.focus();o.buttons=0;\
         el.dispatchEvent(new PointerEvent('pointerup',o));el.dispatchEvent(new MouseEvent('mouseup',o));el.click();\
-        return el.tagName.toLowerCase()})()
+        return el.tagName.toLowerCase();
         """)
-        let (result, _) = try await inBrowserWindow(bundle: bundle, title: title, [
-            "tell active tab to return execute javascript \(js)", "return do JavaScript \(js) in current tab",
-        ])
-        let tag = result.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-        return tag.isEmpty || tag.hasPrefix("matches") || tag == "nothing" ? nil : tag
+    }
+
+    /// Sets a page field or dropdown from inside the page the way typing or
+    /// choosing would: through the element's own value setter (which frameworks
+    /// like React watch), then input and change events. Returns the new value.
+    static func webSetValue(_ element: AXUIElement, window: WindowInfo, point: CGPoint, _ value: String) async throws -> String? {
+        let v = String(data: try JSONEncoder().encode(value), encoding: .utf8) ?? "\"\""
+        return try await inPage(element, window: window, point: point, """
+        var v=\(v);while(el&&!/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)&&!el.isContentEditable)el=el.parentElement;if(!el)return 'nothing';\
+        if(el.tagName==='SELECT'){var o=[].find.call(el.options,function(o){return o.text.trim()===v||o.value===v});\
+        if(!o)o=[].find.call(el.options,function(o){return o.text.trim().toLowerCase().indexOf(v.toLowerCase())===0});\
+        if(!o)return 'no option '+v;v=o.value;}\
+        if(el.focus)el.focus();\
+        if(el.isContentEditable){el.textContent=v;}else{var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el),'value');d.set.call(el,v);}\
+        el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));\
+        return 'value:'+(el.tagName==='SELECT'?el.options[el.selectedIndex].text:(el.isContentEditable?el.textContent:el.value));
+        """)
+    }
+
+    /// Scrolls the nearest scrollable box around the page element at `point`
+    /// (or the page) from inside the page; what it scrolled and where to.
+    static func webScroll(_ element: AXUIElement, window: WindowInfo, point: CGPoint, dx: Int32, dy: Int32) async throws -> String? {
+        // backseat's dy is a wheel delta: negative scrolls down.
+        try await inPage(element, window: window, point: point, """
+        var s=el;function can(e){var c=getComputedStyle(e);return (/(auto|scroll)/.test(c.overflowY+c.overflowX))&&(e.scrollHeight>e.clientHeight||e.scrollWidth>e.clientWidth);}\
+        while(s&&s!==document.body&&s!==document.documentElement&&!can(s))s=s.parentElement;\
+        if(!s||s===document.body)s=document.scrollingElement;var t0=s.scrollTop,l0=s.scrollLeft;\
+        s.scrollBy(\(-dx),\(-dy));\
+        return (s===document.scrollingElement?'the page':'a '+s.tagName.toLowerCase()+' box')+' to '+s.scrollLeft+','+s.scrollTop+(s.scrollTop===t0&&s.scrollLeft===l0?' (it was already at the end)':'');
+        """)
+    }
+
+    /// The web area (page) `e` is in, if any.
+    static func webArea(of e: AXUIElement) -> AXUIElement? {
+        var cur: AXUIElement? = e
+        for _ in 0..<40 {
+            guard let c = cur else { return nil }
+            if AX.string(c, kAXRoleAttribute) == "AXWebArea" { return c }
+            cur = AX.attr(c, kAXParentAttribute).map { $0 as! AXUIElement }
+        }
+        return nil
+    }
+
+    /// Scrolls a page element into view if it's outside the visible part of
+    /// the page: clicks and page scripts can only reach what's on screen.
+    static func revealInPage(_ e: AXUIElement) async {
+        guard let area = webArea(of: e).flatMap(AX.frame) else { return }
+        func visible() -> Bool { AX.frame(e).map { area.contains(CGPoint(x: $0.midX, y: $0.midY)) } ?? true }
+        guard !visible() else { return }
+        AXUIElementPerformAction(e, "AXScrollToVisible" as CFString)
+        for _ in 0..<10 where !visible() { try? await Task.sleep(for: .milliseconds(50)) }
+    }
+
+    /// Activates a page control from the keyboard: focus it (inside its own
+    /// window, never the user's) and press Space or Return, which every
+    /// browser handles in a background window. For browsers that can't run a
+    /// page script. Nil if `e` isn't a control that keys activate.
+    /// The page control (button, link, checkbox…) `e` is or is inside.
+    static func webControl(_ e: AXUIElement) -> AXUIElement? {
+        var cur: AXUIElement? = e
+        for _ in 0..<5 {
+            guard let c = cur else { return nil }
+            let role = AX.string(c, kAXRoleAttribute) ?? ""
+            if ["AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXMenuItem", "AXTab"].contains(role) { return c }
+            if role == "AXWebArea" { return nil }
+            cur = AX.attr(c, kAXParentAttribute).map { $0 as! AXUIElement }
+        }
+        return nil
+    }
+
+    static func webKeyActivate(_ e: AXUIElement, pid: pid_t, _ args: Args) async throws -> String? {
+        let control = webControl(e)
+        guard let control else { return nil }
+        try aim(at: AX.containingWindow(control), pid: pid, what: "a key press", args)
+        AXUIElementSetAttributeValue(control, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        // The page takes focus a moment later; never press a key until it's there,
+        // or it would land on whatever had focus before.
+        for _ in 0..<10 where (AX.attr(control, kAXFocusedAttribute) as? Bool) != true {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard (AX.attr(control, kAXFocusedAttribute) as? Bool) == true else { return nil }
+        try await Task.sleep(for: .milliseconds(80))  // the page's own focus lands just after
+        // Space toggles checkboxes and radio buttons; Return activates buttons,
+        // links and the rest as soon as it's pressed.
+        let toggle = ["AXCheckBox", "AXRadioButton"].contains(AX.string(control, kAXRoleAttribute) ?? "")
+        Input.key(code: toggle ? 49 : 36, flags: [], pid: pid)
+        return toggle ? "Space" : "Return"
+    }
+
+    /// An editable text field of the window's own (an address bar), not one in a page.
+    static func addressField(_ window: AXUIElement) -> AXUIElement? {
+        var queue = AX.elements(window, kAXChildrenAttribute)
+        var seen = 0
+        var fallback: AXUIElement?
+        while !queue.isEmpty, seen < 600 {
+            let e = queue.removeFirst(); seen += 1
+            let role = AX.string(e, kAXRoleAttribute) ?? ""
+            if role == "AXWebArea" { continue }
+            if role == "AXTextField" || role == "AXComboBox", AX.isSettable(e, kAXValueAttribute) {
+                let label = (Tree.label(e) + " " + (AX.string(e, kAXDescriptionAttribute) ?? "")).lowercased()
+                if ["address", "url", "search"].contains(where: label.contains) { return e }
+                if fallback == nil { fallback = e }
+            }
+            queue += AX.elements(e, kAXChildrenAttribute)
+        }
+        return fallback
     }
 
     /// True if `e` is inside a web page.
@@ -569,7 +717,11 @@ enum Tools {
     }
 
     /// Runs AppleScript with osascript and a 15-second limit.
-    static func osascript(_ source: String) async throws -> (out: String, err: String, status: Int32) {
+    static func debugLog(_ s: String) {
+        if ProcessInfo.processInfo.environment["BACKSEAT_DEBUG"] == "1" { FileHandle.standardError.write(Data("backseat: \(s)\n".utf8)) }
+    }
+
+    static func osascript(_ source: String, timeout: Double = 15) async throws -> (out: String, err: String, status: Int32) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         proc.arguments = ["-e", source]
@@ -579,9 +731,9 @@ enum Tools {
         try proc.run()
         let outData = Task.detached { out.fileHandleForReading.readDataToEndOfFile() }
         let errData = Task.detached { err.fileHandleForReading.readDataToEndOfFile() }
-        let deadline = Date().addingTimeInterval(15)
+        let deadline = Date().addingTimeInterval(timeout)
         while proc.isRunning && Date() < deadline { try await Task.sleep(for: .milliseconds(30)) }
-        if proc.isRunning { proc.terminate(); throw ToolError("script timed out after 15s") }
+        if proc.isRunning { proc.terminate(); throw ToolError("script timed out after \(Int(timeout))s") }
         func text(_ d: Data) -> String { String(decoding: d, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) }
         return (text(await outData.value), text(await errData.value), proc.terminationStatus)
     }
@@ -662,7 +814,24 @@ enum Tools {
             }
             return .text(all.isEmpty ? "no matches in any window of pid \(pid)" : all.joined(separator: "\n"))
         }
-        let (root, origin, what) = try root(args)
+        var (root, origin, what) = try root(args)
+        // A page in one of the agent's windows of a Chromium browser that can't
+        // run page scripts (backseat clicks from inside the page where it can): switch on
+        // its screen-reader mode before handing out element ids, so the ids are
+        // from the tree that pressing them works on (it's rebuilt when the mode
+        // comes on, and Press on page controls only works with it).
+        if let wid = args.int("window_id").map({ CGWindowID($0) }), let info = try? Windows.get(wid),
+           AX.isChromium(info.pid), Ownership.shared.owns(wid, pid: info.pid), !webAreas(root).isEmpty,
+           let app = NSRunningApplication(processIdentifier: info.pid), (try? checkAutomation(app)) == nil,
+           AX.startScreenReaderMode(info.pid) {
+            // Chrome rebuilds the page's tree on the first read after the mode
+            // comes on; elements read before that stop working. Read it once,
+            // let the rebuild finish, then search.
+            Thread.sleep(forTimeInterval: 0.5)
+            _ = AX.digest(root, limit: 3000)
+            Thread.sleep(forTimeInterval: 1)
+            (root, origin, what) = try self.root(args)
+        }
         let text = args.string("text")?.lowercased()
         let role = args.string("role").map(normalizeRole)
         guard text != nil || role != nil else { throw ToolError("pass text and/or role") }
@@ -765,6 +934,52 @@ enum Tools {
         else if let d = raw?.doubleValue { text = String(d) }
         else if let b = raw?.boolValue { text = b ? "true" : "false" }
         else { throw ToolError("missing required argument 'value'") }
+
+        // Fields and dropdowns in a web page: setting the accessibility value
+        // changes what's shown, but the page gets no input event, so forms
+        // (React and the like) never see it. Set it the way typing would.
+        let role = AX.string(e, kAXRoleAttribute) ?? ""
+        if attribute == kAXValueAttribute, ["AXTextField", "AXTextArea", "AXComboBox", "AXPopUpButton"].contains(role), inWebPage(e),
+           let wid = Ownership.window(of: e), let window = try? Windows.get(wid) {
+            await revealInPage(e)
+            let point = center(of: e, in: window) ?? .zero
+            if let out = try await webSetValue(e, window: window, point: point, text) {
+                guard out.hasPrefix("value:") else { throw ToolError("\(describe(e, id)): \(out)") }
+                let now = String(out.dropFirst(6))
+                return .text("set \(describe(e, id)) from inside the page, as typing or choosing would; now \"\(now.clipped(400))\"\(now == text || role == "AXPopUpButton" ? "" : " (not what was given: the page changed it)")" + FocusGuard.shared.drainNotes(for: window.pid))
+            }
+            if role == "AXPopUpButton" {
+                // No page script: focus the dropdown and type the option's
+                // name, which picks it without opening the menu.
+                let (_, note) = try await FocusGuard.run(target: window.pid) { () -> Void in
+                    try aim(at: AX.containingWindow(e), pid: window.pid, what: "choosing an option", args)
+                    AXUIElementSetAttributeValue(e, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                    Input.type(text, pid: window.pid)
+                }
+                for _ in 0..<10 where !(AX.valueString(e) ?? "").hasPrefix(text) { try await Task.sleep(for: .milliseconds(50)) }
+                let now = AX.valueString(e) ?? ""
+                guard now.lowercased().hasPrefix(text.lowercased()) else {
+                    throw ToolError("\(describe(e, id)) didn't change to \"\(text)\" (it shows \"\(now)\"); pass the option's text exactly as shown")
+                }
+                return .text("chose \"\(now)\" in \(describe(e, id)) by typing its name into the focused dropdown\(note)")
+            }
+            if AX.isSettable(e, kAXSelectedTextAttribute) {
+                // Not scriptable: replace the field's text through accessibility,
+                // which the page sees as typing.
+                let (_, note) = try await FocusGuard.run(target: window.pid) { () -> Void in
+                    AXUIElementSetAttributeValue(e, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                    var all = CFRange(location: 0, length: (AX.valueString(e) ?? "").utf16.count)
+                    if let range = AXValueCreate(.cfRange, &all) {
+                        AXUIElementSetAttributeValue(e, kAXSelectedTextRangeAttribute as CFString, range)
+                    }
+                    AXUIElementSetAttributeValue(e, kAXSelectedTextAttribute as CFString, text as CFString)
+                }
+                for _ in 0..<10 where AX.valueString(e) != text { try await Task.sleep(for: .milliseconds(50)) }
+                if AX.valueString(e) == text {
+                    return .text("set \(describe(e, id)) by typing over its text through accessibility; now \"\(text.clipped(400))\" (exactly as given)\(note)")
+                }
+            }
+        }
 
         let current = AX.attr(e, attribute)
         let value: CFTypeRef
@@ -897,6 +1112,7 @@ enum Tools {
                 throw ToolError("nothing in this app has keyboard focus, so keystrokes would just beep. Pass element_id for the field to type into.")
             }
             try aim(at: element.flatMap(AX.containingWindow), pid: pid, what: "typing", args)
+            if let element, args.string("element_id") != nil { AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) }
             Input.type(text, pid: pid)
             return "sent as key events to pid \(pid)"
         }
@@ -1032,6 +1248,7 @@ enum Tools {
         let before = Set(Windows.list(pid: pid).map(\.id))
         let (_, note) = try await FocusGuard.run(target: pid) {
             try aim(at: target.flatMap { AX.containingWindow($0) ?? $0 }, pid: pid, what: combo, args)
+            if let target, args.string("element_id") != nil { AXUIElementSetAttributeValue(target, kAXFocusedAttribute as CFString, kCFBooleanTrue) }
             for _ in 0..<times {
                 Input.key(code: code, flags: flags, pid: pid)
                 usleep(15_000)
@@ -1094,6 +1311,7 @@ enum Tools {
             return .text("pressed in order: " + done.joined(separator: ", ") + note)
         }
 
+        if let id = args.string("element_id"), let e = try? ElementStore.shared.get(id) { await revealInPage(e) }
         // A plain click on something pressable is exact through accessibility.
         if method != "mouse", button == .left, count == 1 {
             if let (e, what, how) = try pressTarget(args) {
@@ -1136,18 +1354,80 @@ enum Tools {
         let hit = AX.element(at: point, in: window)
         let before = snapshot(of: hit ?? AX.window(id: window.id, pid: window.pid), pid: window.pid)
         // Web pages in a background browser window: click from inside the page.
-        if method != "mouse", button == .left, count == 1, let hit, inWebPage(hit) {
+        // The element asked for, when there is one: in a background browser a
+        // hit test at its position can land on something else.
+        let subject = (try? args.string("element_id").map(ElementStore.shared.get)) ?? hit
+        if method != "mouse", button == .left, count == 1, let subject, inWebPage(subject) {
+            let hit = subject
             FocusGuard.shared.touch(window.pid, seconds: 5)
             if let tag = try await webClick(hit, window: window, point: point) {
                 let changed = try await changes(since: before)
                 return .text("clicked \(what) (<\(tag)>) from inside the page\(changed)" + FocusGuard.shared.drainNotes(for: window.pid))
+            }
+            // Chromium browsers press page controls through accessibility once
+            // their screen-reader mode is on (they don't list Press, but do it).
+            if var control = webControl(hit) {
+                if AX.startScreenReaderMode(window.pid) {
+                    // The page's accessibility tree is rebuilt when the mode
+                    // comes on, and old references stop working: find it again.
+                    try await Task.sleep(for: .milliseconds(1000))
+                    let role = AX.string(control, kAXRoleAttribute), label = Tree.label(control)
+                    if let w = AX.window(id: window.id, pid: window.pid, search: true), !label.isEmpty,
+                       let fresh = Tree.search(w, text: label, role: role, limit: 1, budget: 3).matches.first {
+                        control = fresh
+                    }
+                }
+                // Focus it first (inside its page only): the first press on a page
+                // that has had no focus yet is otherwise sometimes dropped.
+                // Right after a page loads from the address bar, the browser's
+                // focus is still there, not in the page: move it into the page.
+                // Chrome only acts on a press once its keyboard focus is in the
+                // page: wait until the app says its focused element is in there.
+                let page = webArea(of: control)
+                func focusInPage() -> Bool {
+                    guard let page, let f = AX.attr(AX.app(window.pid), kAXFocusedUIElementAttribute).map({ $0 as! AXUIElement }) else { return false }
+                    return webArea(of: f).map { CFEqual($0, page) } ?? false
+                }
+                if let page, !focusInPage() {
+                    AXUIElementSetAttributeValue(page, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                    for _ in 0..<30 where !focusInPage() { try await Task.sleep(for: .milliseconds(50)) }
+                }
+                AXUIElementSetAttributeValue(control, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                for _ in 0..<10 where (AX.attr(control, kAXFocusedAttribute) as? Bool) != true { try await Task.sleep(for: .milliseconds(50)) }
+                let (status, note) = try await FocusGuard.run(target: window.pid) { AXUIElementPerformAction(control, kAXPressAction as CFString) }
+                if status == .success {
+                    let changed = try await changes(since: before)
+                    if changed.contains("no visible change"), AX.string(control, kAXRoleAttribute) == "AXLink",
+                       let href = (AX.attr(control, "AXURL") as? URL)?.absoluteString, href.hasPrefix("http") {
+                        _ = try await navigate(window: window.id, to: href, args)
+                        return .text("followed \(what) to \(href) by loading it in this window (the browser didn't act on a press of it in the background); wait until loaded\(note)")
+                    }
+                    return .text("pressed \(what) via accessibility\(changed)\(note)")
+                }
+            }
+            let (key, note) = try await FocusGuard.run(target: window.pid) { try await webKeyActivate(hit, pid: window.pid, args) }
+            if let key {
+                let changed = try await changes(since: before)
+                // A link that didn't respond to Return: go where it points, in this window.
+                if changed.contains("no visible change"), AX.string(hit, kAXRoleAttribute) == "AXLink",
+                   let href = (AX.attr(hit, "AXURL") as? URL)?.absoluteString, href.hasPrefix("http") {
+                    _ = try await navigate(window: window.id, to: href, args)
+                    return .text("followed \(what) to \(href) by loading it in this window (the browser took neither a click nor Return on it in the background); wait until loaded\(note)")
+                }
+                return .text("activated \(what) from the keyboard (focused it and pressed \(key)): this browser takes neither clicks nor page scripts in a background window\(changed)\(note)")
             }
         }
         let (_, note) = try await FocusGuard.run(target: window.pid) {
             Input.click(at: point, window: window, button: button, count: count)
         }
         let changed = try await changes(since: before, expectMenu: button == .right)
-        return .text("\(button.rawValue)-clicked \(what)\(count > 1 ? " ×\(count)" : "") via pointer events to window \(window.id)\(changed)\(note)")
+        // Chromium browsers ignore pointer events in a background window, and a
+        // window scripting can't reach (Arc's Little Arc popups) can't be
+        // clicked from inside the page either.
+        let hint = changed.contains("no visible change") && hit.map(inWebPage) == true
+            ? "\n(clicks in this browser window only work from inside the page, which needs a window the browser lists to scripts: open one with select_menu_item File > New Window and type the address into it)"
+            : ""
+        return .text("\(button.rawValue)-clicked \(what)\(count > 1 ? " ×\(count)" : "") via pointer events to window \(window.id)\(changed)\(note)\(hint)")
     }
 
     /// What a plain click acts on through accessibility: the element (or the
@@ -1258,6 +1538,20 @@ enum Tools {
         let dx = Int32(args.int("dx") ?? 0), dy = Int32(args.int("dy") ?? -300)
         let method = args.string("method") ?? "auto"
 
+        // In a web page, scroll the box under the point (the page's own
+        // scroll area is all accessibility offers), from inside the page.
+        if method != "mouse", let hit = (try? args.string("element_id").map(ElementStore.shared.get)) ?? AX.element(at: point, in: window),
+           inWebPage(hit) {
+            if let moved = try await webScroll(hit, window: window, point: point, dx: dx, dy: dy) {
+                return .text("scrolled \(moved) from inside the page")
+            }
+            // No page script: wheel events at the point reach the box under it in
+            // browsers that take them in the background; check that something moved.
+            let before = AX.frame(hit)
+            let (_, note) = try await FocusGuard.run(target: window.pid) { Input.scroll(at: point, dx: dx, dy: dy, window: window) }
+            for _ in 0..<6 where AX.frame(hit) == before { try await Task.sleep(for: .milliseconds(50)) }
+            if AX.frame(hit) != before { return .text("scrolled dx=\(dx) dy=\(dy) at \(what) via pointer events\(note)") }
+        }
         if method != "mouse", let moved = try scrollWithAccessibility(args, point: point, window: window, dx: dx, dy: dy) {
             return .text("scrolled \(moved) via accessibility")
         }
@@ -1328,7 +1622,15 @@ enum Tools {
             Nothing was sent. Use set_value, type_text or click on elements of your window instead, or try again once they've switched away.
             """)
         }
+        // Keys go to the app's key window. Make it this one (inside the app
+        // only: the app stays in the background), or an app's own popups and
+        // helper windows (Chrome has several) can take them instead.
+        FocusGuard.shared.aimingKeys(at: pid)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        // Only if it isn't already: focusing a window moves focus inside it
+        // away from the field that should get the keys.
+        let focused = AX.attr(AX.app(pid), kAXFocusedWindowAttribute).map { $0 as! AXUIElement }.flatMap(AX.windowID)
+        if focused != id { AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue) }
     }
 
     /// Windows `pid` opened since `before` was taken, as text for a tool's reply.
@@ -1818,7 +2120,8 @@ enum Tools {
                 // Right after a navigation starts, the old page is gone and the
                 // new one isn't there yet; only give up if none ever shows.
                 if webs.isEmpty {
-                    if elapsed() >= 3000 { throw ToolError("\(what) has no web page; use until settled") }
+                    // A browser's first page in a new window can take several seconds to appear.
+                    if elapsed() >= min(ms, 10000) { throw ToolError("\(what) has no web page; use until settled") }
                     lastDigest = nil
                     try await Task.sleep(for: .milliseconds(100))
                     continue
