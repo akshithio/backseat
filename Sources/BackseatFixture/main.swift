@@ -80,6 +80,12 @@ final class Controller: NSObject, NSTextFieldDelegate, NSApplicationDelegate, NS
     let table = NSTableView()
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        if CommandLine.arguments.contains("--activate-on-launch") {
+            // Like apps that bring themselves forward as they start (Chrome,
+            // Safari): ask to be the active app, at launch and a moment later.
+            NSApp.activate(ignoringOtherApps: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { NSApp.activate(ignoringOtherApps: true) }
+        }
         window.title = "Backseat Fixture"
         window.delegate = self
         window.isReleasedWhenClosed = false
@@ -444,7 +450,9 @@ app.delegate = controller
 // Accessory: no Dock tile, so test runs never show up in the user's Dock. It
 // still has a menu bar for backseat to drive and can still activate itself,
 // which is what the tests watch for.
-app.setActivationPolicy(.accessory)
+// A regular app when it plays one that activates itself on launch: those
+// are Dock apps, and macOS treats their activation differently.
+app.setActivationPolicy(CommandLine.arguments.contains("--activate-on-launch") ? .regular : .accessory)
 // Its icon (in the app switcher, if it ever activates): a test tube.
 app.applicationIconImage = NSImage(size: NSSize(width: 512, height: 512), flipped: false) { rect in
     NSColor(calibratedRed: 0.13, green: 0.55, blue: 0.33, alpha: 1).setFill()

@@ -53,61 +53,9 @@ enum AX {
     static func app(_ pid: pid_t) -> AXUIElement {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 3)
-        enableFullTree(app, pid)
         return app
     }
 
-    nonisolated(unsafe) private static var screenReaderMode: Set<pid_t> = []
-
-    /// Turns on an app's screen-reader mode, once. Chromium browsers (Chrome,
-    /// Edge, Brave) ignore Press on page buttons and links until it's on. It
-    /// slows the app a little, so `endScreenReaderMode` turns it back off when
-    /// backseat exits. True if it was just turned on.
-    @discardableResult
-    static func startScreenReaderMode(_ pid: pid_t) -> Bool {
-        enabledLock.lock()
-        let first = screenReaderMode.insert(pid).inserted
-        enabledLock.unlock()
-        if first { AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXEnhancedUserInterface" as CFString, kCFBooleanTrue) }
-        return first
-    }
-
-    static func endScreenReaderMode() {
-        enabledLock.lock()
-        let pids = screenReaderMode
-        screenReaderMode.removeAll()
-        enabledLock.unlock()
-        for pid in pids where NSRunningApplication(processIdentifier: pid) != nil {
-            AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
-        }
-    }
-
-    private static let enabledLock = NSLock()
-    nonisolated(unsafe) private static var enabled: Set<pid_t> = []
-
-    /// Chromium-based apps (Chrome, Arc, Edge, Electron apps) build only a
-    /// partial accessibility tree for web content until a client asks for the
-    /// full one: page buttons and links come without their press action, so
-    /// clicks on them can't go through accessibility. Ask once per app; other
-    /// apps don't have the attribute and ignore it.
-    private static func enableFullTree(_ app: AXUIElement, _ pid: pid_t) {
-        enabledLock.lock()
-        let first = enabled.insert(pid).inserted
-        enabledLock.unlock()
-        if first, AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue) == .success {
-            enabledLock.lock(); chromium.insert(pid); enabledLock.unlock()
-        }
-    }
-
-    nonisolated(unsafe) private static var chromium: Set<pid_t> = []
-
-    /// True for Chromium-based apps (Chrome, Edge, Arc, Electron apps): the
-    /// only ones that take the full-tree attribute.
-    static func isChromium(_ pid: pid_t) -> Bool {
-        _ = app(pid)
-        enabledLock.lock(); defer { enabledLock.unlock() }
-        return chromium.contains(pid)
-    }
 
     static func attr(_ e: AXUIElement, _ name: String) -> AnyObject? {
         var value: AnyObject?
