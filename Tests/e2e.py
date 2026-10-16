@@ -73,12 +73,12 @@ def user_acted_since(t):
     return mouse < elapsed or (key < elapsed and cmd)
 
 
-def make_bundle(tmp):
+def make_bundle(tmp, bundle_id="dev.backseat.fixture"):
     app = os.path.join(tmp, "BackseatFixture.app")
     os.makedirs(os.path.join(app, "Contents", "MacOS"))
     shutil.copy(os.path.join(BIN, "BackseatFixture"), os.path.join(app, "Contents", "MacOS", "BackseatFixture"))
     with open(os.path.join(app, "Contents", "Info.plist"), "wb") as f:
-        plistlib.dump({"CFBundleExecutable": "BackseatFixture", "CFBundleIdentifier": "dev.backseat.fixture",
+        plistlib.dump({"CFBundleExecutable": "BackseatFixture", "CFBundleIdentifier": bundle_id,
                        "CFBundleName": "BackseatFixture", "CFBundlePackageType": "APPL",
                        "NSPrincipalClass": "NSApplication"}, f)
     return app
@@ -159,8 +159,8 @@ class Run:
             self.failed.append((name, e))
             print(f"  ✗ {name}: {e}")
 
-    def launch(self, *flags):
-        app = make_bundle(self.tmp)
+    def launch(self, *flags, bundle_id="dev.backseat.fixture"):
+        app = make_bundle(self.tmp, bundle_id)
         out = self.mcp.ok("launch_app", path=app, arguments=[self.state_path, *flags])
         self.pid = int(re.search(r"pid=(\d+)", out).group(1))
         assert self.eventually(lambda s: s.get("ready") and "onActiveSpace" in s, timeout=10), "fixture never became ready"
@@ -640,7 +640,9 @@ def other_space_suite(r):
         # them back in their own app, on their own Space, right away.
         user = jxa("$.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier")
         out = m.ok("select_menu_item", pid=r.pid, path=["Fixture", "Bring To Front"])
-        assert r.eventually(lambda s: s["becameActive"] >= 1, timeout=2), "fixture never activated itself; test is moot"
+        # backseat may undo it before the fixture even notices it was active, so
+        # take its word for the activation (it reports every hand-back).
+        assert r.state()["becameActive"] >= 1 or "brought itself to the front" in out, f"fixture never activated itself; test is moot ({out[:120]})"
         deadline = time.time() + 1.5
         while time.time() < deadline:
             front = jxa("$.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier")
@@ -658,6 +660,26 @@ def other_space_suite(r):
     # so it only runs when asked for.
     if "--focus" in sys.argv:
         r.check("app that activates itself hands focus and Space back", self_activation_undone, activates=True)
+
+        def launch_that_activates():
+            # Some apps bring themselves forward as they launch (Chrome, Safari),
+            # whatever they're asked. The user has to end up where they were.
+            user = jxa("$.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier")
+            launched_at = time.time()
+            other = Run(m, "launch")
+            try:
+                # Its own bundle id, or macOS would just reopen the fixture already running.
+                app = make_bundle(other.tmp, "dev.backseat.fixture.launch")
+                out = m.ok("launch_app", path=app, arguments=[other.state_path, "--activate-on-launch", "--invisible"])
+                other.pid = int(re.search(r"pid=(\d+)", out).group(1))
+                time.sleep(1.5)  # it asks again half a second in
+                front = jxa("$.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier")
+                if front != user and user_acted_since(launched_at):
+                    raise AssertionError(f"inconclusive: you clicked or ⌘-switched to pid {front} during the test")
+                assert front == user, f"focus stayed on pid {front}, user was in {user}; backseat said: {out[-160:]}"
+            finally:
+                other.stop()
+        r.check("launching an app that activates itself leaves the user where they were", launch_that_activates, activates=True)
 
 
 def outline_suite(r):

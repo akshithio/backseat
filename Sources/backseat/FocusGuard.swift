@@ -30,8 +30,17 @@ final class FocusGuard: @unchecked Sendable {
     /// Apps being launched by backseat (bundle URL -> until when).
     private var launching: [URL: Date] = [:]
 
+    /// The user's last real click: when, and which app's window or Dock it hit.
+    private var lastClick: (at: Date, pid: pid_t?)?
+
     private init() {
         userApp = NSWorkspace.shared.frontmostApplication
+        // Where the user clicks, so a switch they made (clicking an app's window
+        // or Dock icon) is told apart from an app bringing itself forward.
+        NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            let pid = Self.app(atScreenPoint: NSEvent.mouseLocation)
+            self?.lock.lock(); self?.lastClick = (Date(), pid); self?.lock.unlock()
+        }
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] note in
@@ -45,6 +54,12 @@ final class FocusGuard: @unchecked Sendable {
         rememberUserWindow(except: pid)
         lock.lock(); defer { lock.unlock() }
         touched[pid] = max(touched[pid] ?? .distantPast, Date().addingTimeInterval(seconds))
+    }
+
+    /// The launch of `url` is over (the app is up and backseat has its pid,
+    /// now covered by `touch`): stop treating its activations as the launch's.
+    func launched(_ url: URL) {
+        lock.lock(); launching[url.standardizedFileURL] = nil; lock.unlock()
     }
 
     /// Call before launching an app, whose pid isn't known yet.
@@ -69,14 +84,45 @@ final class FocusGuard: @unchecked Sendable {
 
     /// The window to put the user back in, for `app`.
     private func handBackWindow(_ app: NSRunningApplication) -> CGWindowID? {
-        lock.lock(); defer { lock.unlock() }
-        guard let w = userWindow, w.pid == app.processIdentifier else { return nil }
+        lock.lock()
+        let w = userWindow
+        lock.unlock()
+        // Only if it still exists: they may have closed it since.
+        guard let w, w.pid == app.processIdentifier, AX.window(id: w.id, pid: w.pid) != nil else { return nil }
         return w.id
+    }
+
+    /// The app owning the topmost window under a screen point (AppKit
+    /// coordinates), the Dock included.
+    static func app(atScreenPoint p: NSPoint) -> pid_t? {
+        let height = NSScreen.screens.first?.frame.height ?? 0
+        let point = CGPoint(x: p.x, y: height - p.y)
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        for w in list {
+            guard let b = w[kCGWindowBounds as String] as? [String: CGFloat],
+                  CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: b["Width"] ?? 0, height: b["Height"] ?? 0).contains(point),
+                  (w[kCGWindowAlpha as String] as? Double ?? 1) > 0 else { continue }
+            return (w[kCGWindowOwnerPID as String] as? Int).map(pid_t.init)
+        }
+        return nil
+    }
+
+    /// True if, in the last moment, the user clicked `pid`'s window or the
+    /// Dock: they switched to it themselves.
+    private func userClicked(_ pid: pid_t) -> Bool {
+        guard let c = lastClick, Date().timeIntervalSince(c.at) < 0.6, let hit = c.pid else { return false }
+        let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier
+        return hit == pid || hit == dock
     }
 
     /// True if the user just clicked, or just pressed a ⌘ shortcut (⌘-Tab, Spotlight),
     /// on real hardware: they switched apps themselves. Plain typing doesn't
     /// count, and events backseat posts to a process never reach the HID system.
+    private var userJustPressedCommand: Bool {
+        CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown) < 0.4
+            && CGEventSource.flagsState(.hidSystemState).contains(.maskCommand)
+    }
+
     private var userJustActed: Bool {
         let recent = { (t: CGEventType) in CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: t) < 0.4 }
         if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(where: recent) { return true }
@@ -91,9 +137,11 @@ final class FocusGuard: @unchecked Sendable {
         if app.processIdentifier == lentTo { lock.unlock(); return }
         let now = Date()
         let launched = app.bundleURL.map { (launching[$0.standardizedFileURL] ?? .distantPast) > now } ?? false
-        // An app backseat is launching right now brought itself forward: that's
-        // never the user, even if they happened to click somewhere this instant.
-        let blamed = launched || ((touched[app.processIdentifier] ?? .distantPast) > now && !userJustActed)
+        // The user's own switch: a click on that app (its window or the Dock),
+        // or a ⌘ shortcut like ⌘-Tab. A click anywhere else, in their own app,
+        // doesn't make an app backseat just touched or launched theirs.
+        let usersOwn = userClicked(app.processIdentifier) || userJustPressedCommand
+        let blamed = ((touched[app.processIdentifier] ?? .distantPast) > now || launched) && !usersOwn
         let user = userApp
         if !blamed { userApp = app }
         lock.unlock()
@@ -192,21 +240,29 @@ final class FocusGuard: @unchecked Sendable {
     /// its main window. A command that opens a window (New Window) makes the new
     /// one main, so the user would land in the agent's window instead of theirs.
     /// While the app stays in the background, make `window` main again.
-    private var aimed: [pid_t: Date] = [:]
+    private var aimed: [pid_t: (at: Date, generation: Int)] = [:]
 
     /// backseat is about to send keys to `pid`'s focused window.
     func aimingKeys(at pid: pid_t) {
-        lock.lock(); aimed[pid] = Date(); lock.unlock()
+        lock.lock(); aimed[pid] = (Date(), (aimed[pid]?.generation ?? 0) + 1); lock.unlock()
     }
 
-    /// True once keys backseat sent to `pid` have had time to land.
-    private func keysSettled(_ pid: pid_t) -> Bool {
+    private func keyGeneration(_ pid: pid_t) -> Int {
         lock.lock(); defer { lock.unlock() }
-        return Date().timeIntervalSince(aimed[pid] ?? .distantPast) >= 0.5
+        return aimed[pid]?.generation ?? 0
+    }
+
+    /// True once keys backseat sent to `pid` have had time to land, and no
+    /// action since `generation` has started sending more.
+    private func keysSettled(_ pid: pid_t, since generation: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let a = aimed[pid] else { return true }
+        return a.generation == generation && Date().timeIntervalSince(a.at) >= 0.5
     }
 
     func holdMain(pid: pid_t, window: AXUIElement) {
         guard let id = AX.windowID(window) else { return }
+        let generation = keyGeneration(pid)
         for delay in [0.05, 0.15, 0.3, 0.6, 1.0, 1.6, 2.5] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 guard let app = NSRunningApplication(processIdentifier: pid), !app.isActive, !app.isTerminated,
@@ -218,7 +274,7 @@ final class FocusGuard: @unchecked Sendable {
                 if main != id { AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue) }
                 // Not before keys backseat just sent have landed: they go to the
                 // focused window when the app gets to them, which would be this one.
-                if focused != id, delay >= 0.6, self.keysSettled(pid) { AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue) }
+                if focused != id, delay >= 0.6, self.keysSettled(pid, since: generation) { AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue) }
             }
         }
     }
@@ -241,9 +297,13 @@ final class FocusGuard: @unchecked Sendable {
         // if not, remember the window the app would take them back to.
         let userWindow = Ownership.userWindow(pid: target)
         let mainBefore = userWindow == nil ? mainWindow(ofBackground: target) : nil
+        // Even if the action fails partway: it may already have made the
+        // agent's window the app's main or focused one.
+        defer {
+            if let userWindow { shared.holdWindow(pid: target, window: userWindow) }
+            if let mainBefore { shared.holdMain(pid: target, window: mainBefore) }
+        }
         let result = try await body()
-        if let userWindow { shared.holdWindow(pid: target, window: userWindow) }
-        if let mainBefore { shared.holdMain(pid: target, window: mainBefore) }
         // Give a self-activation triggered by the action time to arrive and be undone.
         try? await Task.sleep(for: .milliseconds(60))  // activations land within ~25ms
         return (result, shared.drainNotes(for: target))

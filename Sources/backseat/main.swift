@@ -18,7 +18,7 @@ let server = Server(
     Nothing here moves the user's cursor or takes their keyboard focus. \
     Work in a window of your own: open one (select_menu_item New Window, or launch_app with a url), \
     keep its window_id, and act only there. Every window you open appears on the user's screen, so open one per task \
-    and reuse it: in a browser, go to the next page with launch_app url + window_id, never a new window per page \
+    and reuse it, never a new window per step \
     (backseat allows \(Ownership.maxWindows) open per app). Windows you didn't open, and the one the user is in, are theirs; \
     backseat refuses to act in them unless you pass user_window: true because the user asked. \
     If your window starts showing something you didn't open, or the user moves into it, open a fresh one. \
@@ -34,7 +34,6 @@ let server = Server(
 // highlight window and hear about other apps activating.
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
-nonisolated(unsafe) var signalSources: [DispatchSourceSignal] = []
 _ = FocusGuard.shared
 
 // First run: have macOS show its Accessibility and Screen Recording prompts
@@ -66,15 +65,6 @@ Task {
     } catch {
         FileHandle.standardError.write(Data("backseat: \(error)\n".utf8))
     }
-    AX.endScreenReaderMode()
     exit(0)
-}
-// Killed rather than closed: still leave apps as they were.
-for sig in [SIGTERM, SIGINT, SIGHUP] {
-    signal(sig, SIG_IGN)
-    let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-    source.setEventHandler { AX.endScreenReaderMode(); exit(0) }
-    source.resume()
-    signalSources.append(source)
 }
 app.run()

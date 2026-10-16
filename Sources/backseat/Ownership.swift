@@ -85,7 +85,7 @@ final class Ownership: @unchecked Sendable {
             let mine = shared.open(pid: pid).map { String($0.id) }
             throw ToolError("""
             not opened: the user is in \(name) right now, and a new \(name) window would take their focus \
-            (in full screen, it moves them to a Space of its own). \(mine.isEmpty ? "" : "Use a window you already have (\(mine.joined(separator: ", "))); in a browser, launch_app with url and window_id loads a page in it. ")\
+            (in full screen, it moves them to a Space of its own). \(mine.isEmpty ? "" : "Use a window you already have (\(mine.joined(separator: ", "))). ")\
             Or do this in another app the user isn't in, or wait until they've left \(name).
             """)
         }
@@ -94,8 +94,8 @@ final class Ownership: @unchecked Sendable {
         let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "this app"
         throw ToolError("""
         not opened: you already have \(mine.count) windows open in \(name) (\(mine.map { String($0.id) }.joined(separator: ", "))), \
-        and each new one appears on the user's screen. Reuse one of yours (launch_app with url and window_id loads a page \
-        in it), or close_window the ones you're done with first.
+        and each new one appears on the user's screen. Reuse one of yours, or close_window \
+        the ones you're done with first.
         """)
     }
 

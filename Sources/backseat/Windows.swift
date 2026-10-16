@@ -24,6 +24,7 @@ struct WindowInfo {
 @_silgen_name("CGSMainConnectionID") private func CGSMainConnectionID() -> Int32
 @_silgen_name("CGSGetActiveSpace") private func CGSGetActiveSpace(_ cid: Int32) -> UInt64
 @_silgen_name("CGSCopySpacesForWindows") private func CGSCopySpacesForWindows(_ cid: Int32, _ mask: Int32, _ windows: CFArray) -> Unmanaged<CFArray>?
+@_silgen_name("CGSCopyManagedDisplaySpaces") private func CGSCopyManagedDisplaySpaces(_ cid: Int32) -> Unmanaged<CFArray>?
 @_silgen_name("CGSSpaceGetType") private func CGSSpaceGetType(_ cid: Int32, _ space: UInt64) -> Int32
 
 enum Windows {
@@ -40,7 +41,18 @@ enum Windows {
     static func isOnActiveSpace(_ id: CGWindowID) -> Bool {
         let cid = CGSMainConnectionID()
         let spaces = (CGSCopySpacesForWindows(cid, 7, [NSNumber(value: id)] as CFArray)?.takeRetainedValue() as? [NSNumber])?.map(\.uint64Value) ?? []
-        return spaces.contains(CGSGetActiveSpace(cid))
+        return !Set(spaces).isDisjoint(with: currentSpaces())
+    }
+
+    /// The Space each display is showing (one per display when displays have
+    /// separate Spaces), not just the one with the menu bar.
+    static func currentSpaces() -> Set<UInt64> {
+        let cid = CGSMainConnectionID()
+        var out: Set<UInt64> = [CGSGetActiveSpace(cid)]
+        for d in CGSCopyManagedDisplaySpaces(cid)?.takeRetainedValue() as? [[String: Any]] ?? [] {
+            if let cur = d["Current Space"] as? [String: Any], let id = (cur["ManagedSpaceID"] as? NSNumber)?.uint64Value { out.insert(id) }
+        }
+        return out
     }
 
     static func state(of w: WindowInfo) -> [String] {
