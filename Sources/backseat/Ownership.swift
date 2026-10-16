@@ -41,6 +41,12 @@ final class Ownership: @unchecked Sendable {
         lock.lock(); apps.insert(pid); lock.unlock()
     }
 
+    /// True if the agent opened window `id` itself (not just any window of an app it launched).
+    func ownsWindow(_ id: CGWindowID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return windows.contains(id)
+    }
+
     func owns(_ id: CGWindowID, pid: pid_t) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return windows.contains(id) || apps.contains(pid)
@@ -51,9 +57,15 @@ final class Ownership: @unchecked Sendable {
         // Accessibility lists real windows (not the hidden ones apps keep
         // around), but can miss one that only just opened; the WindowServer
         // has a window on screen the moment it's shown. Count both.
-        var all = Windows.list(pid: pid)
-        let listed = Set(all.map(\.id))
-        all += Windows.all().filter { $0.pid == pid && $0.layer == 0 && !listed.contains($0.id) }
+        // Only windows someone could see count: apps keep helper windows ordered
+        // out (Chrome has a couple), on no Space at all. Minimized ones count.
+        func real(_ w: WindowInfo) -> Bool {
+            w.alpha > 0 && (Windows.hasSpace(w.id)
+                || AX.window(id: w.id, pid: pid).map { (AX.attr($0, kAXMinimizedAttribute) as? Bool) == true } == true)
+        }
+        var all = Windows.list(pid: pid).filter(real)
+        let listed = Set(Windows.list(pid: pid).map(\.id))
+        all += Windows.all().filter { $0.pid == pid && $0.layer == 0 && !listed.contains($0.id) && real($0) }
         lock.lock(); defer { lock.unlock() }
         return apps.contains(pid) ? all : all.filter { windows.contains($0.id) }
     }

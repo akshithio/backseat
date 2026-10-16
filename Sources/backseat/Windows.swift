@@ -29,6 +29,20 @@ struct WindowInfo {
 enum Windows {
     /// Where a window is relative to the user, so an agent knows the layout up
     /// front: every tool works on all of these except screenshot on minimized.
+    /// True if window `id` is on some Space. Windows an app keeps ordered out
+    /// (helpers, popups not showing) are on none.
+    static func hasSpace(_ id: CGWindowID) -> Bool {
+        let cid = CGSMainConnectionID()
+        return !((CGSCopySpacesForWindows(cid, 7, [NSNumber(value: id)] as CFArray)?.takeRetainedValue() as? [NSNumber]) ?? []).isEmpty
+    }
+
+    /// True if window `id` is on the Space the user is looking at.
+    static func isOnActiveSpace(_ id: CGWindowID) -> Bool {
+        let cid = CGSMainConnectionID()
+        let spaces = (CGSCopySpacesForWindows(cid, 7, [NSNumber(value: id)] as CFArray)?.takeRetainedValue() as? [NSNumber])?.map(\.uint64Value) ?? []
+        return spaces.contains(CGSGetActiveSpace(cid))
+    }
+
     static func state(of w: WindowInfo) -> [String] {
         var out: [String] = []
         if Ownership.shared.owns(w.id, pid: w.pid) { out.append("yours: you opened it") }

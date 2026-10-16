@@ -29,6 +29,9 @@ enum Input {
             guard let e = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { continue }
             e.flags = flags
             e.postToPid(pid)
+            // A real key stays down for a moment; some apps act on the release
+            // only if they've seen the press first.
+            if down { usleep(20_000) }
         }
     }
 

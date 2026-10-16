@@ -57,6 +57,31 @@ enum AX {
         return app
     }
 
+    nonisolated(unsafe) private static var screenReaderMode: Set<pid_t> = []
+
+    /// Turns on an app's screen-reader mode, once. Chromium browsers (Chrome,
+    /// Edge, Brave) ignore Press on page buttons and links until it's on. It
+    /// slows the app a little, so `endScreenReaderMode` turns it back off when
+    /// backseat exits. True if it was just turned on.
+    @discardableResult
+    static func startScreenReaderMode(_ pid: pid_t) -> Bool {
+        enabledLock.lock()
+        let first = screenReaderMode.insert(pid).inserted
+        enabledLock.unlock()
+        if first { AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXEnhancedUserInterface" as CFString, kCFBooleanTrue) }
+        return first
+    }
+
+    static func endScreenReaderMode() {
+        enabledLock.lock()
+        let pids = screenReaderMode
+        screenReaderMode.removeAll()
+        enabledLock.unlock()
+        for pid in pids where NSRunningApplication(processIdentifier: pid) != nil {
+            AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
+        }
+    }
+
     private static let enabledLock = NSLock()
     nonisolated(unsafe) private static var enabled: Set<pid_t> = []
 
@@ -69,7 +94,19 @@ enum AX {
         enabledLock.lock()
         let first = enabled.insert(pid).inserted
         enabledLock.unlock()
-        if first { AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue) }
+        if first, AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue) == .success {
+            enabledLock.lock(); chromium.insert(pid); enabledLock.unlock()
+        }
+    }
+
+    nonisolated(unsafe) private static var chromium: Set<pid_t> = []
+
+    /// True for Chromium-based apps (Chrome, Edge, Arc, Electron apps): the
+    /// only ones that take the full-tree attribute.
+    static func isChromium(_ pid: pid_t) -> Bool {
+        _ = app(pid)
+        enabledLock.lock(); defer { enabledLock.unlock() }
+        return chromium.contains(pid)
     }
 
     static func attr(_ e: AXUIElement, _ name: String) -> AnyObject? {
@@ -141,8 +178,30 @@ enum AX {
         return seenWindows[pid] ?? [:]
     }
 
+    /// Window-created observers, by pid. A window that opens on a Space the user
+    /// isn't on (they're in a full-screen app) never shows up in the app's
+    /// window list, and the remote-token scan can't find it either: the only
+    /// element the app ever hands out for it is the one in this notification.
+    nonisolated(unsafe) private static var watchers: [pid_t: AXObserver] = [:]
+    private static let watchLock = NSLock()
+
+    /// Remembers every window `pid` opens from now on, so a command's new
+    /// window is reachable (and counted) wherever it lands.
+    static func watchNewWindows(_ pid: pid_t) {
+        watchLock.lock(); defer { watchLock.unlock() }
+        guard watchers[pid] == nil else { return }
+        var observer: AXObserver?
+        guard AXObserverCreate(pid, { _, window, _, _ in AX.remember([window], pid: AX.pid(window)) }, &observer) == .success,
+              let observer,
+              AXObserverAddNotification(observer, app(pid), kAXWindowCreatedNotification as CFString, nil) == .success else { return }
+        // backseat's main run loop is always spinning (main.swift), so callbacks arrive there.
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        watchers[pid] = observer
+    }
+
     /// All of an app's windows, including ones on other Spaces.
     static func windows(_ pid: pid_t) -> [AXUIElement] {
+        watchNewWindows(pid)
         var result = elements(app(pid), kAXWindowsAttribute)
         defer { remember(result, pid: pid) }
         var seen = Set(result.compactMap(windowID))

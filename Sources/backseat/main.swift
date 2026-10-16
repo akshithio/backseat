@@ -34,6 +34,7 @@ let server = Server(
 // highlight window and hear about other apps activating.
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
+nonisolated(unsafe) var signalSources: [DispatchSourceSignal] = []
 _ = FocusGuard.shared
 
 // First run: have macOS show its Accessibility and Screen Recording prompts
@@ -65,6 +66,15 @@ Task {
     } catch {
         FileHandle.standardError.write(Data("backseat: \(error)\n".utf8))
     }
+    AX.endScreenReaderMode()
     exit(0)
+}
+// Killed rather than closed: still leave apps as they were.
+for sig in [SIGTERM, SIGINT, SIGHUP] {
+    signal(sig, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+    source.setEventHandler { AX.endScreenReaderMode(); exit(0) }
+    source.resume()
+    signalSources.append(source)
 }
 app.run()
