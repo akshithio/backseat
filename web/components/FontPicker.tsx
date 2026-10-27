@@ -4,13 +4,14 @@ import { useEffect, useState } from "react";
 
 // Dev-only: switch the site's font pairing live to compare options.
 const OPTIONS = [
-  { id: "current", label: "Geist + JetBrains Mono" },
-  { id: "space", label: "Space Grotesk + Space Mono" },
-  { id: "plex", label: "IBM Plex Sans + Plex Mono" },
-  { id: "inter", label: "Inter Tight + Geist Mono" },
-  { id: "instrument", label: "Instrument Sans + DM Mono" },
-  { id: "pixel", label: "Silkscreen + Plex Mono" },
-  { id: "sans", label: "Inter Tight + Inter (no mono)" },
+  { id: "current", label: "Geist" },
+  { id: "inter", label: "Inter Tight + Inter" },
+  { id: "instrument", label: "Instrument Sans" },
+  { id: "space", label: "Space Grotesk + Inter" },
+  { id: "hanken", label: "Hanken Grotesk" },
+  { id: "schibsted", label: "Schibsted Grotesk" },
+  { id: "bricolage", label: "Bricolage Grotesque + Inter" },
+  { id: "plex", label: "IBM Plex Sans" },
 ];
 
 export function FontPicker() {

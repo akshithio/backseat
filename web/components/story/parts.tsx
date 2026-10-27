@@ -104,7 +104,7 @@ export function Chapter({
           >
             <svg
               viewBox="0 0 160 100"
-              className="absolute inset-0 h-full w-full font-mono"
+              className="absolute inset-0 h-full w-full font-sans"
               role="img"
               aria-label={beat[1]}
             >
