@@ -7,7 +7,7 @@
 	<key>CFBundleName</key>
 	<string>backseat</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.1.1</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>backseat checks whether it may script an app before running a script for your agent, so macOS never asks you unexpectedly.</string>
 </dict>

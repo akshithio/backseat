@@ -4,7 +4,7 @@
 # this plugin's version and checks its checksum. Nothing is built locally.
 # stdout belongs to MCP, so everything said here goes to stderr.
 set -e
-VERSION=0.1.0
+VERSION=0.1.1
 DIR="${BACKSEAT_HOME:-$HOME/.backseat}"
 BIN="$DIR/bin/backseat"
 

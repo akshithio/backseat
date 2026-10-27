@@ -37,7 +37,7 @@ codesign --force --timestamp --options runtime --identifier dev.backseat.backsea
 codesign --verify --strict "$OUT/backseat"
 
 ZIP="$OUT/backseat-$VERSION-macos.zip"
-(cd "$OUT" && ditto -c -k backseat "$(basename "$ZIP")")
+(cd "$OUT" && ditto -c -k --norsrc backseat "$(basename "$ZIP")")
 echo "notarizing (a few minutes)"
 xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait | tee "$OUT/notary.log"
 grep -q "status: Accepted" "$OUT/notary.log" || die "notarization wasn't accepted; see $OUT/notary.log"

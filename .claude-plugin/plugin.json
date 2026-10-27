@@ -1,7 +1,7 @@
 {
   "name": "backseat",
   "description": "Computer use for macOS that doesn't take over your screen: an MCP server that drives Mac apps in the background while you keep working, plus a skill that teaches agents to stay out of your way.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "mcpServers": "./.mcp.json",
   "author": { "name": "Akshith Garapati", "url": "https://akshith.io" },
   "homepage": "https://backseat.akshith.io",

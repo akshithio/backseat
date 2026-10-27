@@ -4,7 +4,7 @@
 #   curl -fsSL https://backseat.akshith.io/install.sh | sh
 set -e
 
-VERSION="${BACKSEAT_VERSION:-0.1.0}"
+VERSION="${BACKSEAT_VERSION:-0.1.1}"
 DIR="${BACKSEAT_HOME:-$HOME/.backseat}"
 BIN="$DIR/bin/backseat"
 URL="https://github.com/akshithio/backseat/releases/download/v$VERSION/backseat-$VERSION-macos.zip"

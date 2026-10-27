@@ -12,7 +12,7 @@ if argv.count >= 3, argv[1] == "listen" {
 
 let server = Server(
     name: "backseat",
-    version: "0.1.0",
+    version: "0.1.1",
     instructions: """
     backseat drives macOS apps in the background while the user keeps using their Mac. \
     Nothing here moves the user's cursor or takes their keyboard focus. \
