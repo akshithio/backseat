@@ -1,0 +1,28 @@
+#!/bin/sh
+# Starts backseat's MCP server for the Claude Code plugin. The first time (and
+# after an update), it downloads the signed, notarized release binary matching
+# this plugin's version and checks its checksum. Nothing is built locally.
+# stdout belongs to MCP, so everything said here goes to stderr.
+set -e
+VERSION=0.1.0
+DIR="${BACKSEAT_HOME:-$HOME/.backseat}"
+BIN="$DIR/bin/backseat"
+
+if [ -n "$BACKSEAT_BIN" ]; then exec "$BACKSEAT_BIN" "$@"; fi
+
+if [ ! -x "$BIN" ] || [ "$(cat "$DIR/bin/VERSION" 2>/dev/null)" != "$VERSION" ]; then
+  [ "$(uname)" = "Darwin" ] || { echo "backseat runs on macOS only" >&2; exit 1; }
+  URL="https://github.com/akshithio/backseat/releases/download/v$VERSION/backseat-$VERSION-macos.zip"
+  TMP=$(mktemp -d)
+  echo "backseat: downloading $VERSION" >&2
+  curl -fsSL "$URL" -o "$TMP/backseat.zip" >&2
+  curl -fsSL "$URL.sha256" -o "$TMP/backseat.zip.sha256" >&2
+  WANT=$(awk '{ print $1 }' "$TMP/backseat.zip.sha256")
+  GOT=$(shasum -a 256 "$TMP/backseat.zip" | awk '{ print $1 }')
+  [ "$WANT" = "$GOT" ] || { echo "backseat: checksum mismatch for $URL" >&2; exit 1; }
+  mkdir -p "$DIR/bin"
+  ditto -x -k "$TMP/backseat.zip" "$DIR/bin"
+  echo "$VERSION" > "$DIR/bin/VERSION"
+  rm -rf "$TMP"
+fi
+exec "$BIN" "$@"

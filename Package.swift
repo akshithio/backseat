@@ -10,7 +10,11 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "backseat",
-            dependencies: [.product(name: "MCP", package: "swift-sdk")]
+            dependencies: [.product(name: "MCP", package: "swift-sdk")],
+            // An identity of its own (bundle id, version) inside the binary, so
+            // macOS ties Accessibility and Screen Recording to backseat itself.
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist",
+                                           "-Xlinker", "scripts/release/Info.plist"])]
         ),
         // Small AppKit app the end-to-end tests drive in the background.
         .executableTarget(name: "BackseatFixture"),

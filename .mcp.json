@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "backseat": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/backseat-mcp"
+    }
+  }
+}

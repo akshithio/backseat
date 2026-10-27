@@ -1,0 +1,16 @@
+{
+  "$schema": "https://code.claude.com/schemas/marketplace.json",
+  "name": "backseat",
+  "description": "backseat: computer use for macOS that doesn't take over your screen.",
+  "owner": { "name": "Akshith Garapati", "url": "https://akshith.io" },
+  "plugins": [
+    {
+      "name": "backseat",
+      "source": "./",
+      "description": "An MCP server that drives Mac apps in the background while you keep using your Mac, and a skill that keeps agents in their own windows.",
+      "homepage": "https://backseat.akshith.io",
+      "repository": "https://github.com/akshithio/backseat",
+      "license": "MIT"
+    }
+  ]
+}
