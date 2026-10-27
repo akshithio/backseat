@@ -41,7 +41,7 @@ function Lane({ t, mode }: { t: number; mode: "before" | "after" }) {
   const sent = t >= SENT;
 
   return (
-    <svg viewBox="0 0 160 90" className="block h-auto w-full font-sans" role="img"
+    <svg viewBox="0 0 160 90" className="block h-auto w-full font-mono" role="img"
       aria-label={before ? "Before the fix: you are pulled to the desktop and focus stays on Finder." : `With backseat: Finder jumps forward, focus returns within ${FOCUS.minMs} to ${FOCUS.maxMs} ms and your Space stays put.`}>
       <defs>
         <clipPath id={`lane-${mode}`}>

@@ -16,7 +16,6 @@
   --color-bad: #e5484d;
   --color-sun: #D9D9D9;
 
-  --font-sans: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-jetbrains), ui-monospace, "SF Mono", Menlo, monospace;
   --font-display: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
 }
@@ -47,9 +46,9 @@ body {
   letter-spacing: -0.035em;
 }
 
-/* Small uppercase line: captions, notes. */
+/* Small uppercase mono line: kickers, captions, notes. */
 .label {
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
   font-weight: 500;
@@ -214,7 +213,7 @@ body {
   background: var(--color-card);
   color: var(--color-ink);
   padding: 3px 8px;
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 500;
   line-height: 1.3;
@@ -327,10 +326,9 @@ body {
 }
 
 /* ------------------------------------------------- font picker (dev only) */
-html[data-font="inter"] { --font-display: var(--font-inter-tight), sans-serif; --font-sans: var(--font-inter), sans-serif; }
-html[data-font="instrument"] { --font-display: var(--font-instrument), sans-serif; --font-sans: var(--font-instrument), sans-serif; }
-html[data-font="space"] { --font-display: var(--font-space-grotesk), sans-serif; --font-sans: var(--font-inter), sans-serif; }
-html[data-font="hanken"] { --font-display: var(--font-hanken), sans-serif; --font-sans: var(--font-hanken), sans-serif; }
-html[data-font="schibsted"] { --font-display: var(--font-schibsted), sans-serif; --font-sans: var(--font-schibsted), sans-serif; }
-html[data-font="bricolage"] { --font-display: var(--font-bricolage), sans-serif; --font-sans: var(--font-inter), sans-serif; }
-html[data-font="plex"] { --font-display: var(--font-plex-sans), sans-serif; --font-sans: var(--font-plex-sans), sans-serif; }
+html[data-font="space"] { --font-display: var(--font-space-grotesk), sans-serif; --font-mono: var(--font-space-mono), monospace; }
+html[data-font="plex"] { --font-display: var(--font-plex-sans), sans-serif; --font-mono: var(--font-plex-mono), monospace; }
+html[data-font="inter"] { --font-display: var(--font-inter-tight), sans-serif; --font-mono: var(--font-geist-mono), monospace; }
+html[data-font="instrument"] { --font-display: var(--font-instrument), sans-serif; --font-mono: var(--font-dm-mono), monospace; }
+html[data-font="pixel"] { --font-display: var(--font-silkscreen), monospace; --font-mono: var(--font-plex-mono), monospace; }
+html[data-font="sans"] { --font-display: var(--font-inter-tight), sans-serif; --font-mono: var(--font-inter), sans-serif; }

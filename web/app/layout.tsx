@@ -29,7 +29,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" className={`${jetbrains.variable} ${geist.variable}${dev ? ` ${candidateVariables}` : ""}`}>
-      <body className="bg-paper font-sans text-ink antialiased">
+      <body className="bg-paper font-mono text-ink antialiased">
         {children}
         {dev ? <FontPicker /> : null}
       </body>
