@@ -2,6 +2,31 @@
 
 Computer use for macOS that doesn't take over your screen. An MCP server that lets an agent drive apps in the background while you keep using your Mac: your cursor, keyboard focus and Space stay yours.
 
+## Install
+
+In Claude Code:
+
+```sh
+claude plugin marketplace add akshithio/backseat && claude plugin install backseat@backseat
+```
+
+That's the MCP server and the skill in one plugin; it downloads a signed, notarized binary the first time it starts. Restart Claude Code to load it. Or:
+
+```sh
+curl -fsSL https://backseat.akshith.io/install.sh | sh    # binary + plugin
+brew install akshithio/tap/backseat                     # binary only, for any MCP client
+```
+
+macOS 14 or later. The first time backseat runs, macOS asks you to allow it Accessibility and Screen Recording; the permissions belong to backseat itself, not to the terminal that started it.
+
+## Try it
+
+Keep coding, and paste this into Claude Code:
+
+> Using backseat, open a new Safari window, look up the weather in San Francisco for this weekend, and tell me what to pack. I'll keep working in this window, so don't touch my focus.
+
+Safari does the work in its own window while your cursor, keyboard and Space stay where they are.
+
 ## How
 
 Nothing backseat does activates the target app. Activation is what takes your keyboard focus, and what drags you across Spaces when the app lives on a different one (e.g. you're in a full-screen app and the agent is working on the desktop).
@@ -43,25 +68,20 @@ A second macOS user, left logged in in the background, has its own active app an
 
 ## Skill
 
-[`skills/backseat/SKILL.md`](skills/backseat/SKILL.md) teaches agents to work alongside you: open their own windows, check results in the accessibility tree, never repeat a send without checking, never take your focus. The installer adds it to Claude Code; with other tools, `npx skills add akshithio/backseat`. The same rules ship in the MCP server's instructions.
+[`skills/backseat/SKILL.md`](skills/backseat/SKILL.md) teaches agents to work alongside you: open their own windows, check results in the accessibility tree, never repeat a send without checking, never take your focus. The plugin includes it; with other tools, `npx skills add akshithio/backseat`. The same rules ship in the MCP server's instructions.
 
 ## Tools
 
 `permissions` `list_apps` `list_windows` `launch_app` `get_ui_tree` `find_elements` `element_info` `perform_action` `set_value` `type_text` `press_key` `click` `scroll` `drag` `screenshot` `select_menu_item` `list_menu` `read_text` `close_window` `run_script` `clipboard` `batch` `wait`
 
-## Build
+## Build from source
 
 ```sh
 swift build -c release
-```
-
-## Use with Claude Code
-
-```sh
 claude mcp add backseat -- "$(pwd)/.build/release/backseat"
 ```
 
-The app that launches backseat (your terminal or MCP client) needs Accessibility and Screen Recording permission.
+A local build isn't signed, so macOS gives its permissions to the app that launches it (your terminal or MCP client). Releases: `scripts/release.sh <version>` builds a universal binary, signs and notarizes it, publishes it on GitHub and updates the Homebrew tap.
 
 ## Benchmark
 
